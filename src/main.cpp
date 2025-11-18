@@ -1,41 +1,46 @@
 #include <iostream>
 #include <vector>
-#include "codec/bitstream/bit_writer.hpp"
-#include "codec/bitstream/bit_reader.hpp"
-#include "codec/rice/rice.hpp"
+#include <cmath>
+
+#include "codec/lpc/lpc.hpp"
 
 int main() {
-    std::vector<int32_t> samples = {
-        0, 1, -1, 5, -5, 100, -100,
-        12345, -12345,
-        32767, -32768,
-        42, -42
-    };
+    std::vector<int32_t> pcm;
+    pcm.reserve(512);
 
-    uint32_t k = 4;
-
-    BitWriter writer;
-    for (int32_t v : samples) {
-        Rice::encode(writer, v, k);
+    const double pi = 3.14159265358979323846;
+    for (int i = 0; i < 512; ++i) {
+        double v = std::sin(2.0 * pi * static_cast<double>(i) / 64.0);
+        pcm.push_back(static_cast<int32_t>(std::round(v * 30000.0)));
     }
-    writer.flush_to_byte();
 
-    const std::vector<uint8_t>& buf = writer.get_buffer();
+    int order = 10;
+    LPC lpc(order);
 
-    BitReader reader(buf);
+    std::vector<int16_t> coeffs_q15;
+    lpc.analyze_block_q15(pcm, coeffs_q15);
+
+    std::vector<int32_t> residual;
+    lpc.compute_residual_q15(pcm, coeffs_q15, residual);
+
+    std::vector<int32_t> restored;
+    lpc.restore_from_residual_q15(residual, coeffs_q15, restored);
 
     bool ok = true;
-    for (size_t i = 0; i < samples.size(); ++i) {
-        int32_t decoded = Rice::decode(reader, k);
-        if (decoded != samples[i]) {
-            std::cout << "Mismatch at index " << i
-                      << " expected=" << samples[i]
-                      << " got=" << decoded << "\n";
+    for (size_t i = 0; i < pcm.size(); ++i) {
+        if (pcm[i] != restored[i]) {
             ok = false;
+            std::cout << "Mismatch at " << i
+                      << " expected=" << pcm[i]
+                      << " got=" << restored[i] << "\n";
         }
     }
 
     if (ok) {
-        std::cout << "RICE TEST PASSED\n";
+        std::cout << "LPC Q15 TEST PASSED\n";
+    } else {
+        std::cout << "LPC Q15 TEST FAILED\n";
     }
+
+    return 0;
 }
