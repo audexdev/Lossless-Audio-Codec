@@ -1,0 +1,60 @@
+# =========================
+# Build artifacts
+# =========================
+build/
+cmake-build*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# =========================
+# Generated binaries
+# =========================
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+lac_cli
+
+# =========================
+# VSCode
+# =========================
+.vscode/
+*.code-search
+
+# =========================
+# macOS system files
+# =========================
+.DS_Store
+.AppleDouble
+.LSOverride
+__MACOSX/
+
+# =========================
+# Logs / temp
+# =========================
+*.log
+*.tmp
+*.bak
+
+# =========================
+# Editor backups
+# =========================
+*~
+*.swp
+*.swo
+
+# =========================
+# IDE / Xcode (念のため)
+# =========================
+*.xcodeproj
+*.xcworkspace
+DerivedData/
+
+# =========================
+# Audio test outputs
+# =========================
+*.wav_decoded.wav
+*.lac
