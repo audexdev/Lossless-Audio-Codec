@@ -4,6 +4,7 @@
 #include <string>
 #include <cmath>
 #include <chrono>
+#include <algorithm>
 #include "io/wav_io.hpp"
 #include "codec/lac/encoder.hpp"
 #include "codec/lac/decoder.hpp"
@@ -64,11 +65,12 @@ int main(int argc, char** argv) {
         std::vector<int32_t> left, right;
         uint16_t channels = 0;
         uint32_t sample_rate = 0;
-        if (!read_wav(in_path, left, right, channels, sample_rate)) {
+        uint8_t bit_depth = 0;
+        if (!read_wav(in_path, left, right, channels, sample_rate, bit_depth)) {
             std::cerr << "Failed to read WAV: " << in_path << "\n";
             return 1;
         }
-        LAC::Encoder encoder(1024, 4, stereo_mode);
+        LAC::Encoder encoder(1024, 4, stereo_mode, sample_rate, bit_depth);
         std::vector<uint8_t> bitstream = encoder.encode(left, right);
         if (!save_file(out_path, bitstream)) {
             std::cerr << "Failed to write LAC file: " << out_path << "\n";
@@ -92,13 +94,12 @@ int main(int argc, char** argv) {
         }
         LAC::Decoder decoder;
         std::vector<int32_t> left, right;
-        decoder.decode(bitstream.data(), bitstream.size(), left, right);
-        if (left.empty()) {
+        FrameHeader hdr;
+        if (!decoder.decode(bitstream.data(), bitstream.size(), left, right, &hdr) || left.empty()) {
             std::cerr << "Decode failed or produced no samples\n";
             return 1;
         }
-        uint16_t channels = right.empty() ? 1 : 2;
-        if (!write_wav(out_path, left, right, channels, 44100)) {
+        if (!write_wav(out_path, left, right, hdr.channels, hdr.sample_rate, hdr.bit_depth)) {
             std::cerr << "Failed to write WAV: " << out_path << "\n";
             return 1;
         }
@@ -107,47 +108,102 @@ int main(int argc, char** argv) {
     }
 
     if (mode == "selftest") {
-        const uint32_t sample_rate = 44100;
-        const size_t total_samples = 44100;
-        std::vector<int32_t> left(total_samples);
-        std::vector<int32_t> right(total_samples);
         const double pi = 3.14159265358979323846;
-        for (size_t i = 0; i < total_samples; ++i) {
-            double t = static_cast<double>(i) / sample_rate;
-            left[i] = static_cast<int32_t>(std::sin(2.0 * pi * 440.0 * t) * 20000);
-            right[i] = static_cast<int32_t>(std::sin(2.0 * pi * 441.0 * t) * 19000);
-        }
+        constexpr int32_t pcm24_max = 0x7FFFFF;
 
-        LAC::Encoder enc_lr(1024, 4, 0);
-        std::vector<uint8_t> bs_lr = enc_lr.encode(left, right);
+        auto generate_signal = [&](uint32_t sample_rate, uint8_t bit_depth, size_t frames,
+                                   std::vector<int32_t>& left, std::vector<int32_t>& right) {
+            left.resize(frames);
+            right.resize(frames);
+            const int64_t amplitude = (bit_depth == 24)
+                ? static_cast<int64_t>(pcm24_max) / 3
+                : static_cast<int64_t>(30000);
+            for (size_t i = 0; i < frames; ++i) {
+                double t = static_cast<double>(i) / static_cast<double>(sample_rate);
+                left[i] = static_cast<int32_t>(std::sin(2.0 * pi * 440.0 * t) * amplitude);
+                right[i] = static_cast<int32_t>(std::sin(2.0 * pi * 443.0 * t) * (amplitude * 0.95));
+            }
+        };
 
-        LAC::Encoder enc_ms(1024, 4, 1);
-        std::vector<uint8_t> bs_ms = enc_ms.encode(left, right);
+        auto legacy_header_matches = [](const std::vector<uint8_t>& bs) -> bool {
+            static const uint8_t expected[11] = {0x4C, 0x41, 0x01, 0x02, 0x00, 0xAC, 0x44, 0x10, 0x04, 0x00, 0x00};
+            if (bs.size() < sizeof(expected)) return false;
+            for (size_t i = 0; i < sizeof(expected); ++i) {
+                if (bs[i] != expected[i]) return false;
+            }
+            return true;
+        };
 
-        LAC::Decoder dec;
-        std::vector<int32_t> dlr_l, dlr_r;
-        auto t0 = std::chrono::high_resolution_clock::now();
-        dec.decode(bs_lr.data(), bs_lr.size(), dlr_l, dlr_r);
-        auto t1 = std::chrono::high_resolution_clock::now();
-        std::vector<int32_t> dms_l, dms_r;
-        auto t2 = std::chrono::high_resolution_clock::now();
-        dec.decode(bs_ms.data(), bs_ms.size(), dms_l, dms_r);
-        auto t3 = std::chrono::high_resolution_clock::now();
+        auto run_pair = [&](uint32_t sample_rate, uint8_t bit_depth, bool check_legacy_header) -> bool {
+            const size_t frames = std::max<size_t>(sample_rate / 20, 2048);
+            std::vector<int32_t> src_left;
+            std::vector<int32_t> src_right;
+            generate_signal(sample_rate, bit_depth, frames, src_left, src_right);
 
-        if (dlr_l != left || dlr_r != right) {
-            std::cerr << "LR roundtrip mismatch\n";
-            return 1;
-        }
-        if (dms_l != left || dms_r != right) {
-            std::cerr << "MS roundtrip mismatch\n";
-            return 1;
-        }
-        bool smaller = bs_ms.size() < bs_lr.size();
-        auto lr_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-        auto ms_us = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
-        std::cout << "Selftest OK. LR size=" << bs_lr.size() << " bytes, MS size=" << bs_ms.size() << " bytes"
-                  << " (MS " << (smaller ? "smaller" : "not smaller") << "), decode us: LR=" << lr_us
-                  << " MS=" << ms_us << "\n";
+            LAC::Encoder enc_lr(1024, 4, 0, sample_rate, bit_depth);
+            std::vector<uint8_t> bs_lr = enc_lr.encode(src_left, src_right);
+            LAC::Decoder decoder;
+            std::vector<int32_t> dec_lr_left, dec_lr_right;
+            FrameHeader hdr_lr;
+            auto t0 = std::chrono::high_resolution_clock::now();
+            if (!decoder.decode(bs_lr.data(), bs_lr.size(), dec_lr_left, dec_lr_right, &hdr_lr)) {
+                std::cerr << "LR decode failed for sr=" << sample_rate << " depth=" << int(bit_depth) << "\n";
+                return false;
+            }
+            auto t1 = std::chrono::high_resolution_clock::now();
+            if (dec_lr_left != src_left || dec_lr_right != src_right) {
+                std::cerr << "LR roundtrip mismatch for sr=" << sample_rate << " depth=" << int(bit_depth) << "\n";
+                return false;
+            }
+            if (hdr_lr.sample_rate != sample_rate || hdr_lr.bit_depth != bit_depth) {
+                std::cerr << "LR header mismatch sr=" << hdr_lr.sample_rate << " depth=" << int(hdr_lr.bit_depth) << "\n";
+                return false;
+            }
+            if (check_legacy_header && !legacy_header_matches(bs_lr)) {
+                std::cerr << "Legacy header bytes changed\n";
+                return false;
+            }
+
+            LAC::Encoder enc_ms(1024, 4, 1, sample_rate, bit_depth);
+            std::vector<uint8_t> bs_ms = enc_ms.encode(src_left, src_right);
+            std::vector<int32_t> dec_ms_left, dec_ms_right;
+            FrameHeader hdr_ms;
+            auto t2 = std::chrono::high_resolution_clock::now();
+            if (!decoder.decode(bs_ms.data(), bs_ms.size(), dec_ms_left, dec_ms_right, &hdr_ms)) {
+                std::cerr << "MS decode failed for sr=" << sample_rate << " depth=" << int(bit_depth) << "\n";
+                return false;
+            }
+            auto t3 = std::chrono::high_resolution_clock::now();
+            if (dec_ms_left != src_left || dec_ms_right != src_right) {
+                std::cerr << "MS roundtrip mismatch for sr=" << sample_rate << " depth=" << int(bit_depth) << "\n";
+                return false;
+            }
+            if (hdr_ms.sample_rate != sample_rate || hdr_ms.bit_depth != bit_depth) {
+                std::cerr << "MS header mismatch sr=" << hdr_ms.sample_rate << " depth=" << int(hdr_ms.bit_depth) << "\n";
+                return false;
+            }
+
+            auto lr_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+            auto ms_us = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
+            bool ms_smaller = bs_ms.size() < bs_lr.size();
+            if (check_legacy_header && !ms_smaller) {
+                std::cerr << "Expected MS compression advantage on legacy test\n";
+                return false;
+            }
+
+            std::cout << "Selftest sr=" << sample_rate << "Hz depth=" << int(bit_depth)
+                      << " LR=" << bs_lr.size() << " bytes (" << lr_us << "us decode)"
+                      << " MS=" << bs_ms.size() << " bytes (" << ms_us << "us decode)"
+                      << " -> MS is " << (ms_smaller ? "smaller" : "not smaller") << "\n";
+            return true;
+        };
+
+        if (!run_pair(44100, 16, true)) return 1;
+        if (!run_pair(48000, 24, false)) return 1;
+        if (!run_pair(96000, 24, false)) return 1;
+        if (!run_pair(192000, 24, false)) return 1;
+
+        std::cout << "Selftest complete: legacy + PCM24 high-rate cases passed.\n";
         return 0;
     }
 

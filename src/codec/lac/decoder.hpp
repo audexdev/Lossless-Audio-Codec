@@ -11,7 +11,7 @@ class Decoder {
 public:
     Decoder();
 
-    void decode(const uint8_t* data, size_t size, std::vector<int32_t>& left, std::vector<int32_t>& right);
+    bool decode(const uint8_t* data, size_t size, std::vector<int32_t>& left, std::vector<int32_t>& right, FrameHeader* out_header = nullptr);
 };
 
 } // namespace LAC
