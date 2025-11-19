@@ -58,3 +58,5 @@ DerivedData/
 # =========================
 *.wav_decoded.wav
 *.lac
+
+assets

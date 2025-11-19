@@ -61,3 +61,14 @@ uint32_t Rice::compute_k(const std::vector<int32_t>& residuals) {
 
     return k;
 }
+
+uint32_t Rice::adapt_k(uint64_t sum, uint32_t count) {
+    if (count == 0) return 0;
+
+    double mean = double(sum) / double(count);
+    uint32_t k = 0;
+    while ((1u << k) < static_cast<uint32_t>(mean + 0.5) && k < 31) {
+        k++;
+    }
+    return k;
+}

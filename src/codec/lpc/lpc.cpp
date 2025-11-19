@@ -1,4 +1,4 @@
-#include "codec/lpc/lpc.hpp"
+#include "lpc.hpp"
 #include <cmath>
 
 LPC::LPC(int order)

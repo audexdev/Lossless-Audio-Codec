@@ -5,7 +5,11 @@ BitReader::BitReader(const uint8_t* data, size_t size) : data(data), size(size),
 BitReader::BitReader(const std::vector<uint8_t>& buf) : data(buf.data()), size(buf.size()), byte_pos(0), bit_pos(0) {}
 
 uint32_t BitReader::read_bit() {
-    if (this->byte_pos >= this->size) return 0;
+    if (this->byte_pos >= this->size) {
+        this->byte_pos = this->size;
+        this->bit_pos = 0;
+        return 0;
+    }
 
     uint8_t byte = this->data[this->byte_pos];
     int shift = 7 - this->bit_pos;

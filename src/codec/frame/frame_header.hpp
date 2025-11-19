@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
-#include "bit_writer.hpp"
-#include "bit_reader.hpp"
+#include "codec/bitstream/bit_writer.hpp"
+#include "codec/bitstream/bit_reader.hpp"
 
 struct FrameHeader {
     uint16_t sync; // 0x4C41 "LA"
