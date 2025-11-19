@@ -5,6 +5,7 @@
 #include "codec/bitstream/bit_writer.hpp"
 #include "codec/block/encoder.hpp"
 #include "codec/frame/frame_header.hpp"
+#include "codec/lac/thread_collector.hpp"
 
 namespace LAC {
 
@@ -12,7 +13,9 @@ class Encoder {
 public:
     Encoder(uint8_t order, uint8_t stereo_mode = 0, uint32_t sample_rate = 44100, uint8_t bit_depth = 16);
 
-    std::vector<uint8_t> encode(const std::vector<int32_t>& left, const std::vector<int32_t>& right);
+    std::vector<uint8_t> encode(const std::vector<int32_t>& left,
+                                const std::vector<int32_t>& right,
+                                ThreadCollector* collector = nullptr);
 
 private:
     uint8_t order;
@@ -31,3 +34,4 @@ private:
 };
 
 } // namespace LAC
+

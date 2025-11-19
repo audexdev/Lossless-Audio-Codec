@@ -1,40 +1,60 @@
 #!/bin/bash
-
 set -e
 
-cd "$(dirname "$0")/build"
+cd "$(dirname "$0")/build-release"
+
+if command -v gdate >/dev/null 2>&1; then
+    DATE_CMD="gdate"
+else
+    DATE_CMD="date"
+fi
+
+measure() {
+    label="$1"
+    shift
+
+    echo ">>> $label"
+
+    start_ms=$($DATE_CMD +%s%3N)
+    "$@"
+    end_ms=$($DATE_CMD +%s%3N)
+
+    elapsed_ms=$((end_ms - start_ms))
+    echo "  time=${elapsed_ms}ms"
+    echo ""
+}
 
 # Encode
-./lac_cli encode ../assets/16.44100.wav 16.44100.lac --stereo-mode=ms
-./lac_cli encode ../assets/16.44100.wav 16.44100_lr.lac
+measure "encode 16.44100.wav (MS)" ./lac_cli encode ../assets/16.44100.wav 16.44100.lac --stereo-mode=ms
+measure "encode 16.44100.wav (LR)" ./lac_cli encode ../assets/16.44100.wav 16.44100_lr.lac
 
-./lac_cli encode ../assets/24.44100.wav 24.44100.lac --stereo-mode=ms
-./lac_cli encode ../assets/24.44100.wav 24.44100_lr.lac
+measure "encode 24.44100.wav (MS)" ./lac_cli encode ../assets/24.44100.wav 24.44100.lac --stereo-mode=ms
+measure "encode 24.44100.wav (LR)" ./lac_cli encode ../assets/24.44100.wav 24.44100_lr.lac
 
-./lac_cli encode ../assets/24.48000.wav 24.48000.lac --stereo-mode=ms
-./lac_cli encode ../assets/24.48000.wav 24.48000_lr.lac
+measure "encode 24.48000.wav (MS)" ./lac_cli encode ../assets/24.48000.wav 24.48000.lac --stereo-mode=ms
+measure "encode 24.48000.wav (LR)" ./lac_cli encode ../assets/24.48000.wav 24.48000_lr.lac
 
-./lac_cli encode ../assets/24.96000.wav 24.96000.lac --stereo-mode=ms
-./lac_cli encode ../assets/24.96000.wav 24.96000_lr.lac
+measure "encode 24.96000.wav (MS)" ./lac_cli encode ../assets/24.96000.wav 24.96000.lac --stereo-mode=ms
+measure "encode 24.96000.wav (LR)" ./lac_cli encode ../assets/24.96000.wav 24.96000_lr.lac
 
-./lac_cli encode ../assets/24.192000.wav 24.192000.lac --stereo-mode=ms
-./lac_cli encode ../assets/24.192000.wav 24.192000_lr.lac
+measure "encode 24.192000.wav (MS)" ./lac_cli encode ../assets/24.192000.wav 24.192000.lac --stereo-mode=ms
+measure "encode 24.192000.wav (LR)" ./lac_cli encode ../assets/24.192000.wav 24.192000_lr.lac
 
 # Decode
-./lac_cli decode 16.44100.lac r_16.44100.wav
-./lac_cli decode 16.44100_lr.lac r_16.44100_lr.wav
+measure "decode 16.44100.lac" ./lac_cli decode 16.44100.lac r_16.44100.wav
+measure "decode 16.44100_lr.lac" ./lac_cli decode 16.44100_lr.lac r_16.44100_lr.wav
 
-./lac_cli decode 24.44100.lac r_24.44100.wav
-./lac_cli decode 24.44100_lr.lac r_24.44100_lr.wav
+measure "decode 24.44100.lac" ./lac_cli decode 24.44100.lac r_24.44100.wav
+measure "decode 24.44100_lr.lac" ./lac_cli decode 24.44100_lr.lac r_24.44100_lr.wav
 
-./lac_cli decode 24.48000.lac r_24.48000.wav
-./lac_cli decode 24.48000_lr.lac r_24.48000_lr.wav
+measure "decode 24.48000.lac" ./lac_cli decode 24.48000.lac r_24.48000.wav
+measure "decode 24.48000_lr.lac" ./lac_cli decode 24.48000_lr.lac r_24.48000_lr.wav
 
-./lac_cli decode 24.96000.lac r_24.96000.wav
-./lac_cli decode 24.96000_lr.lac r_24.96000_lr.wav
+measure "decode 24.96000.lac" ./lac_cli decode 24.96000.lac r_24.96000.wav
+measure "decode 24.96000_lr.lac" ./lac_cli decode 24.96000_lr.lac r_24.96000_lr.wav
 
-./lac_cli decode 24.192000.lac r_24.192000.wav
-./lac_cli decode 24.192000_lr.lac r_24.192000_lr.wav
+measure "decode 24.192000.lac" ./lac_cli decode 24.192000.lac r_24.192000.wav
+measure "decode 24.192000_lr.lac" ./lac_cli decode 24.192000_lr.lac r_24.192000_lr.wav
 
 echo "--------------------------------------"
 echo " All encode/decode operations complete "

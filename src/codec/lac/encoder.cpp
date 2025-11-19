@@ -1,5 +1,7 @@
 #include "encoder.hpp"
 #include <limits>
+#include <future>
+#include <thread>
 #include "codec/simd/neon.hpp"
 
 namespace {
@@ -20,7 +22,8 @@ Encoder::Encoder(uint8_t order, uint8_t stereo_mode, uint32_t sample_rate, uint8
 
 std::vector<uint8_t> Encoder::encode(
     const std::vector<int32_t>& left,
-    const std::vector<int32_t>& right
+    const std::vector<int32_t>& right,
+    ThreadCollector* collector
 ) {
     BitWriter writer;
 
@@ -48,46 +51,70 @@ std::vector<uint8_t> Encoder::encode(
         writer.write_bits(block.size, 32);
     }
 
-    Block::Encoder blockEnc(this->order);
+    const bool isStereo = (hdr.channels == 2);
+    const bool useMidSide = isStereo && (hdr.stereo_mode == 1);
+
+    std::vector<std::future<std::vector<uint8_t>>> blockTasks;
+    blockTasks.reserve(blocks.size());
+
+    auto launch_policy = std::thread::hardware_concurrency() > 1
+        ? std::launch::async
+        : std::launch::deferred;
 
     for (const auto& block : blocks) {
-        size_t start = block.start;
-        size_t end = start + block.size;
+        blockTasks.emplace_back(std::async(
+            launch_policy,
+            [this, &left, &right, isStereo, useMidSide, block, collector]() -> std::vector<uint8_t> {
+                Block::Encoder blockEnc(this->order);
+                std::vector<uint8_t> encodedBytes;
+                const size_t start = block.start;
+                const size_t end = start + block.size;
 
-        if (hdr.channels == 2 && hdr.stereo_mode == 1) {
-            std::vector<int32_t> blockMid(block.size);
-            std::vector<int32_t> blockSide(block.size);
-            if (block.size > 0) {
-                SIMD::ms_encode_simd_or_scalar(
-                    left.data() + start,
-                    right.data() + start,
-                    blockMid.data(),
-                    blockSide.data(),
-                    block.size
-                );
+                if (collector) {
+                    collector->record(std::this_thread::get_id());
+                }
+
+                if (block.size == 0) {
+                    return encodedBytes;
+                }
+
+                if (useMidSide) {
+                    std::vector<int32_t> blockMid(block.size);
+                    std::vector<int32_t> blockSide(block.size);
+                    SIMD::ms_encode_simd_or_scalar(
+                        left.data() + start,
+                        right.data() + start,
+                        blockMid.data(),
+                        blockSide.data(),
+                        block.size
+                    );
+
+                    std::vector<uint8_t> encodedMid = blockEnc.encode(blockMid);
+                    std::vector<uint8_t> encodedSide = blockEnc.encode(blockSide);
+                    encodedBytes.reserve(encodedMid.size() + encodedSide.size());
+                    encodedBytes.insert(encodedBytes.end(), encodedMid.begin(), encodedMid.end());
+                    encodedBytes.insert(encodedBytes.end(), encodedSide.begin(), encodedSide.end());
+                } else {
+                    std::vector<int32_t> blockL(left.begin() + start, left.begin() + end);
+                    std::vector<uint8_t> encodedL = blockEnc.encode(blockL);
+                    encodedBytes.insert(encodedBytes.end(), encodedL.begin(), encodedL.end());
+
+                    if (isStereo) {
+                        std::vector<int32_t> blockR(right.begin() + start, right.begin() + end);
+                        std::vector<uint8_t> encodedR = blockEnc.encode(blockR);
+                        encodedBytes.insert(encodedBytes.end(), encodedR.begin(), encodedR.end());
+                    }
+                }
+
+                return encodedBytes;
             }
+        ));
+    }
 
-            std::vector<uint8_t> encodedMid = blockEnc.encode(blockMid);
-            for (uint8_t b : encodedMid)
-                writer.write_bits(b, 8);
-
-            std::vector<uint8_t> encodedSide = blockEnc.encode(blockSide);
-            for (uint8_t b : encodedSide)
-                writer.write_bits(b, 8);
-        } else {
-            std::vector<int32_t> blockL(left.begin() + start, left.begin() + end);
-            std::vector<uint8_t> encodedL = blockEnc.encode(blockL);
-
-            for (uint8_t b : encodedL)
-                writer.write_bits(b, 8);
-
-            if (hdr.channels == 2) {
-                std::vector<int32_t> blockR(right.begin() + start, right.begin() + end);
-                std::vector<uint8_t> encodedR = blockEnc.encode(blockR);
-
-                for (uint8_t b : encodedR)
-                    writer.write_bits(b, 8);
-            }
+    for (auto& futureBytes : blockTasks) {
+        std::vector<uint8_t> bytes = futureBytes.get();
+        for (uint8_t b : bytes) {
+            writer.write_bits(b, 8);
         }
     }
 
