@@ -1,5 +1,6 @@
 #include "encoder.hpp"
 #include <limits>
+#include "codec/simd/neon.hpp"
 
 namespace {
 struct BlockInfo {
@@ -56,11 +57,14 @@ std::vector<uint8_t> Encoder::encode(
         if (hdr.channels == 2 && hdr.stereo_mode == 1) {
             std::vector<int32_t> blockMid(block.size);
             std::vector<int32_t> blockSide(block.size);
-            for (size_t i = 0; i < block.size; ++i) {
-                int32_t l = left[start + i];
-                int32_t r = right[start + i];
-                blockMid[i] = (l + r) >> 1;
-                blockSide[i] = l - r;
+            if (block.size > 0) {
+                SIMD::ms_encode_simd_or_scalar(
+                    left.data() + start,
+                    right.data() + start,
+                    blockMid.data(),
+                    blockSide.data(),
+                    block.size
+                );
             }
 
             std::vector<uint8_t> encodedMid = blockEnc.encode(blockMid);
@@ -140,12 +144,16 @@ double Encoder::block_complexity(const std::vector<int32_t>& channel,
     if (length <= 1) return 0.0;
 
     int64_t sum = 0;
-    int32_t prev = channel[position];
-    for (size_t i = 1; i < length; ++i) {
-        int32_t cur = channel[position + i];
-        int64_t diff = static_cast<int64_t>(cur) - static_cast<int64_t>(prev);
-        sum += (diff >= 0 ? diff : -diff);
-        prev = cur;
+    if constexpr (SIMD::kHasNeon) {
+        sum = SIMD::neon_absdiff_sum(channel.data() + position, length);
+    } else {
+        int32_t prev = channel[position];
+        for (size_t i = 1; i < length; ++i) {
+            int32_t cur = channel[position + i];
+            int64_t diff = static_cast<int64_t>(cur) - static_cast<int64_t>(prev);
+            sum += (diff >= 0 ? diff : -diff);
+            prev = cur;
+        }
     }
 
     return static_cast<double>(sum) / static_cast<double>(length);

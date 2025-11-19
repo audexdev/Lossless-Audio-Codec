@@ -1,0 +1,270 @@
+#include "codec/simd/neon.hpp"
+#include <vector>
+
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
+
+namespace {
+
+inline void ms_encode_scalar_impl(const int32_t* L, const int32_t* R,
+                                  int32_t* M, int32_t* S,
+                                  size_t n) {
+    if (!L || !R || !M || !S || n == 0) return;
+    for (size_t i = 0; i < n; ++i) {
+        int32_t l = L[i];
+        int32_t r = R[i];
+        M[i] = (l + r) >> 1;
+        S[i] = l - r;
+    }
+}
+
+inline void lpc_residual_scalar_span(const int32_t* pcm,
+                                     const int16_t* coeffs_q15,
+                                     int32_t* residual,
+                                     size_t start,
+                                     size_t end,
+                                     int order) {
+    if (!pcm || !coeffs_q15 || !residual) return;
+    if (start >= end) return;
+    if (order <= 0) {
+        for (size_t i = start; i < end; ++i) residual[i] = pcm[i];
+        return;
+    }
+
+    const int16_t* coeffs = coeffs_q15 + 1;
+
+    for (size_t sample = start; sample < end; ++sample) {
+        int taps = order;
+        if (sample < static_cast<size_t>(order)) {
+            taps = static_cast<int>(sample);
+        }
+        if (taps <= 0) {
+            residual[sample] = pcm[sample];
+            continue;
+        }
+        int64_t acc = 0;
+        for (int i = 0; i < taps; ++i) {
+            size_t sourceIndex = sample - static_cast<size_t>(i) - 1;
+            acc += static_cast<int64_t>(coeffs[i]) *
+                   static_cast<int64_t>(pcm[sourceIndex]);
+        }
+        int32_t pred = static_cast<int32_t>(acc >> 15);
+        residual[sample] = pcm[sample] - pred;
+    }
+}
+
+} // namespace
+
+namespace SIMD {
+
+bool neon_available() {
+    return kHasNeon;
+}
+
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+int64_t neon_absdiff_sum(const int32_t* pcm, size_t n) {
+    if (!pcm || n <= 1) return 0;
+
+    const size_t diff_count = n - 1;
+    size_t i = 0;
+    int64x2_t acc0 = vdupq_n_s64(0);
+    int64x2_t acc1 = vdupq_n_s64(0);
+    const size_t vec_iters = diff_count / 4;
+
+    for (size_t chunk = 0; chunk < vec_iters; ++chunk, i += 4) {
+        int32x4_t curr = vld1q_s32(pcm + i);
+        int32x4_t next = vld1q_s32(pcm + i + 1);
+        int32x4_t diff = vabdq_s32(next, curr);
+        acc0 = vaddq_s64(acc0, vmovl_s32(vget_low_s32(diff)));
+        acc1 = vaddq_s64(acc1, vmovl_s32(vget_high_s32(diff)));
+    }
+
+    int64x2_t acc = vaddq_s64(acc0, acc1);
+    int64_t sum = vgetq_lane_s64(acc, 0) + vgetq_lane_s64(acc, 1);
+    const size_t processed = i;
+
+    if (processed < diff_count) {
+        int32_t prev = pcm[processed];
+        for (size_t idx = processed + 1; idx < n; ++idx) {
+            int32_t cur = pcm[idx];
+            int64_t d = static_cast<int64_t>(cur) - static_cast<int64_t>(prev);
+            sum += (d >= 0 ? d : -d);
+            prev = cur;
+        }
+    }
+
+    return sum;
+}
+
+void neon_ms_encode(const int32_t* L, const int32_t* R,
+                    int32_t* M, int32_t* S,
+                    size_t n) {
+    if (!L || !R || !M || !S || n == 0) return;
+
+    size_t i = 0;
+    const size_t limit = n & ~static_cast<size_t>(3);
+    const int32x4_t ones = vdupq_n_s32(1);
+
+    for (; i < limit; i += 4) {
+        int32x4_t l = vld1q_s32(L + i);
+        int32x4_t r = vld1q_s32(R + i);
+        int32x4_t sum = vaddq_s32(l, r);
+        int32x4_t odd = vandq_s32(sum, ones);
+        sum = vsubq_s32(sum, odd);
+        int32x4_t mid = vrshrq_n_s32(sum, 1);
+        int32x4_t side = vsubq_s32(l, r);
+        vst1q_s32(M + i, mid);
+        vst1q_s32(S + i, side);
+    }
+
+    if (i < n) {
+        ms_encode_scalar_impl(L + i, R + i, M + i, S + i, n - i);
+    }
+}
+
+void neon_lpc_residual(const int32_t* pcm,
+                       const int16_t* coeffs_q15,
+                       int32_t* residual,
+                       size_t n,
+                       int order) {
+    if (!pcm || !coeffs_q15 || !residual || n == 0) return;
+    if (order <= 0) {
+        for (size_t i = 0; i < n; ++i) residual[i] = pcm[i];
+        return;
+    }
+
+    const int16_t* coeffs = coeffs_q15 + 1;
+
+    size_t order_sz = static_cast<size_t>(order);
+    size_t warmup = (order_sz < n) ? order_sz : n;
+    lpc_residual_scalar_span(pcm, coeffs_q15, residual, 0, warmup, order);
+    if (warmup >= n) return;
+
+    size_t sample = warmup;
+    std::vector<const int32_t*> history(order);
+    for (int tap = 0; tap < order; ++tap) {
+        history[tap] = pcm + warmup - static_cast<size_t>(tap + 1);
+    }
+    size_t vec_samples = ((n - sample) / 4) * 4;
+    size_t vec_end = sample + vec_samples;
+
+    for (; sample < vec_end; sample += 4) {
+        const int32_t* curr_ptr = pcm + sample;
+        int64x2_t acc_lo = vdupq_n_s64(0);
+        int64x2_t acc_hi = vdupq_n_s64(0);
+
+        int tap = 0;
+        for (; tap + 3 < order; tap += 4) {
+            int32_t c0 = static_cast<int32_t>(coeffs[tap + 0]);
+            int32_t c1 = static_cast<int32_t>(coeffs[tap + 1]);
+            int32_t c2 = static_cast<int32_t>(coeffs[tap + 2]);
+            int32_t c3 = static_cast<int32_t>(coeffs[tap + 3]);
+
+            const int32_t* ptr0 = history[tap + 0];
+            int32x4_t prev0 = vld1q_s32(ptr0);
+            int32x2_t prev0_lo = vget_low_s32(prev0);
+            int32x2_t prev0_hi = vget_high_s32(prev0);
+            int32x2_t coeff0 = vdup_n_s32(c0);
+            acc_lo = vmlal_s32(acc_lo, prev0_lo, coeff0);
+            acc_hi = vmlal_s32(acc_hi, prev0_hi, coeff0);
+            history[tap + 0] = ptr0 + 4;
+
+            const int32_t* ptr1 = history[tap + 1];
+            int32x4_t prev1 = vld1q_s32(ptr1);
+            int32x2_t prev1_lo = vget_low_s32(prev1);
+            int32x2_t prev1_hi = vget_high_s32(prev1);
+            int32x2_t coeff1 = vdup_n_s32(c1);
+            acc_lo = vmlal_s32(acc_lo, prev1_lo, coeff1);
+            acc_hi = vmlal_s32(acc_hi, prev1_hi, coeff1);
+            history[tap + 1] = ptr1 + 4;
+
+            const int32_t* ptr2 = history[tap + 2];
+            int32x4_t prev2 = vld1q_s32(ptr2);
+            int32x2_t prev2_lo = vget_low_s32(prev2);
+            int32x2_t prev2_hi = vget_high_s32(prev2);
+            int32x2_t coeff2 = vdup_n_s32(c2);
+            acc_lo = vmlal_s32(acc_lo, prev2_lo, coeff2);
+            acc_hi = vmlal_s32(acc_hi, prev2_hi, coeff2);
+            history[tap + 2] = ptr2 + 4;
+
+            const int32_t* ptr3 = history[tap + 3];
+            int32x4_t prev3 = vld1q_s32(ptr3);
+            int32x2_t prev3_lo = vget_low_s32(prev3);
+            int32x2_t prev3_hi = vget_high_s32(prev3);
+            int32x2_t coeff3 = vdup_n_s32(c3);
+            acc_lo = vmlal_s32(acc_lo, prev3_lo, coeff3);
+            acc_hi = vmlal_s32(acc_hi, prev3_hi, coeff3);
+            history[tap + 3] = ptr3 + 4;
+        }
+
+        for (; tap < order; ++tap) {
+            int32_t coeff_val = static_cast<int32_t>(coeffs[tap]);
+            const int32_t* ptr = history[tap];
+            int32x4_t prev = vld1q_s32(ptr);
+            int32x2_t prev_lo = vget_low_s32(prev);
+            int32x2_t prev_hi = vget_high_s32(prev);
+            int32x2_t coeff_dup = vdup_n_s32(coeff_val);
+            acc_lo = vmlal_s32(acc_lo, prev_lo, coeff_dup);
+            acc_hi = vmlal_s32(acc_hi, prev_hi, coeff_dup);
+            history[tap] = ptr + 4;
+        }
+
+        int64x2_t pred_lo = vshrq_n_s64(acc_lo, 15);
+        int64x2_t pred_hi = vshrq_n_s64(acc_hi, 15);
+        int32x2_t pred_lo32 = vmovn_s64(pred_lo);
+        int32x2_t pred_hi32 = vmovn_s64(pred_hi);
+        int32x4_t pred = vcombine_s32(pred_lo32, pred_hi32);
+
+        int32x4_t curr = vld1q_s32(curr_ptr);
+        int32x4_t res = vsubq_s32(curr, pred);
+        vst1q_s32(residual + sample, res);
+    }
+
+    if (vec_end < n) {
+        lpc_residual_scalar_span(pcm, coeffs_q15, residual, vec_end, n, order);
+    }
+}
+#else
+int64_t neon_absdiff_sum(const int32_t*, size_t) {
+    return 0;
+}
+
+void neon_ms_encode(const int32_t* L, const int32_t* R,
+                    int32_t* M, int32_t* S,
+                    size_t n) {
+    ms_encode_scalar_impl(L, R, M, S, n);
+}
+
+void neon_lpc_residual(const int32_t* pcm,
+                       const int16_t* coeffs_q15,
+                       int32_t* residual,
+                       size_t n,
+                       int order) {
+    lpc_residual_scalar_span(pcm, coeffs_q15, residual, 0, n, order);
+}
+#endif
+
+void ms_encode_simd_or_scalar(const int32_t* L, const int32_t* R,
+                              int32_t* M, int32_t* S,
+                              size_t n) {
+    if (neon_available()) {
+        neon_ms_encode(L, R, M, S, n);
+    } else {
+        ms_encode_scalar_impl(L, R, M, S, n);
+    }
+}
+
+void lpc_residual_simd_or_scalar(const int32_t* pcm,
+                                 const int16_t* coeffs_q15,
+                                 int32_t* residual,
+                                 size_t n,
+                                 int order) {
+    if (neon_available()) {
+        neon_lpc_residual(pcm, coeffs_q15, residual, n, order);
+    } else {
+        lpc_residual_scalar_span(pcm, coeffs_q15, residual, 0, n, order);
+    }
+}
+
+} // namespace SIMD

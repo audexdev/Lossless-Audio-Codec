@@ -2,6 +2,8 @@
 #include "codec/lpc/lpc.hpp"
 #include "codec/rice/rice.hpp"
 #include "codec/bitstream/bit_writer.hpp"
+#include "codec/simd/neon.hpp"
+#include "codec/simd/rice_neon.hpp"
 
 namespace Block {
 
@@ -23,13 +25,34 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
     std::vector<int16_t> coeffs_q15;
     lpc.analyze_block_q15(pcm, coeffs_q15);
 
-    std::vector<int32_t> residual;
-    lpc.compute_residual_q15(pcm, coeffs_q15, residual);
+    std::vector<int32_t> residual(pcm.size());
+    if (!pcm.empty() && !coeffs_q15.empty()) {
+        SIMD::lpc_residual_simd_or_scalar(pcm.data(),
+                                          coeffs_q15.data(),
+                                          residual.data(),
+                                          pcm.size(),
+                                          this->order);
+    }
+
+    std::vector<uint32_t> rice_unsigned(residual.size());
+    std::vector<uint64_t> rice_prefix(residual.size());
+    if (!residual.empty()) {
+        SIMD::rice_unsigned_simd_or_scalar(residual.data(),
+                                           rice_unsigned.data(),
+                                           residual.size());
+        SIMD::rice_prefix_sum_simd_or_scalar(rice_unsigned.data(),
+                                             rice_prefix.data(),
+                                             residual.size());
+    }
+
+    std::vector<uint32_t> rice_k_next(residual.size());
+    for (size_t i = 0; i < residual.size(); ++i) {
+        rice_k_next[i] = Rice::adapt_k(rice_prefix[i],
+                                       static_cast<uint32_t>(i + 1));
+    }
 
     int k = this->choose_rice_k(residual);
     uint32_t current_k = static_cast<uint32_t>(k);
-    uint64_t sumU = 0;
-    uint32_t count = 0;
 
     Rice rice;
 
@@ -42,12 +65,9 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
         bw.write_bits(uint16_t(coeffs_q15[i]), 16);
     }
 
-    for (int32_t r : residual) {
-        rice.encode(bw, r, current_k);
-        uint32_t u = static_cast<uint32_t>((r << 1) ^ (r >> 31));
-        sumU += u;
-        ++count;
-        current_k = Rice::adapt_k(sumU, count);
+    for (size_t i = 0; i < residual.size(); ++i) {
+        rice.encode(bw, residual[i], current_k);
+        current_k = rice_k_next[i];
     }
 
     bw.flush_to_byte();
