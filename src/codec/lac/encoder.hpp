@@ -9,13 +9,14 @@ namespace LAC {
 
 class Encoder {
 public:
-    Encoder(uint16_t block_size, uint8_t order);
+    Encoder(uint16_t block_size, uint8_t order, uint8_t stereo_mode = 0);
 
     std::vector<uint8_t> encode(const std::vector<int32_t>& left, const std::vector<int32_t>& right);
 
 private:
     uint16_t block_size;
     uint8_t order;
+    uint8_t stereo_mode;
 };
 
 } // namespace LAC

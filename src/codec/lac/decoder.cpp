@@ -5,37 +5,65 @@ namespace LAC {
 Decoder::Decoder() {}
 
 void Decoder::decode(const uint8_t* data, size_t size, std::vector<int32_t>& left, std::vector<int32_t>& right) {
-    BitReader br(data, size);
-
-    FrameHeader hdr;
-    hdr.read(br);
-
-    if (hdr.sync != 0x4C41 || hdr.version != 1 ||
-        (hdr.channels != 1 && hdr.channels != 2) ||
-        hdr.sample_rate != 44100 || hdr.bit_depth != 16 ||
-        hdr.block_size == 0 || hdr.reserved != 0)
-        return;
-
-    Block::Decoder blockDec;
-
     left.clear();
     right.clear();
 
-    while (!br.eof()) {
-        std::vector<int32_t> pcmL = blockDec.decode(br);
-        if (pcmL.empty()) break;
-        left.insert(left.end(), pcmL.begin(), pcmL.end());
+    FrameHeader hdr;
+    size_t header_bytes = 0;
+    if (!FrameHeader::parse(data, size, hdr, header_bytes))
+        return;
 
-        if (hdr.channels == 2) {
-            std::vector<int32_t> pcmR = blockDec.decode(br);
-            if (pcmR.empty()) break;
-            right.insert(right.end(), pcmR.begin(), pcmR.end());
+    BitReader br(data + header_bytes, size - header_bytes);
+
+    Block::Decoder blockDec;
+
+    if (hdr.channels == 1) {
+        while (!br.eof()) {
+            std::vector<int32_t> pcmL = blockDec.decode(br);
+            if (pcmL.empty()) break;
+            left.insert(left.end(), pcmL.begin(), pcmL.end());
         }
-    }
-
-    if (!right.empty() && right.size() != left.size()) {
-        right.clear();
-        left.clear();
+    } else {
+        if (hdr.stereo_mode == 0) {
+            while (!br.eof()) {
+                std::vector<int32_t> pcmL = blockDec.decode(br);
+                if (pcmL.empty()) break;
+                std::vector<int32_t> pcmR = blockDec.decode(br);
+                if (pcmR.empty() || pcmR.size() != pcmL.size()) {
+                    left.clear();
+                    right.clear();
+                    return;
+                }
+                left.insert(left.end(), pcmL.begin(), pcmL.end());
+                right.insert(right.end(), pcmR.begin(), pcmR.end());
+            }
+        } else if (hdr.stereo_mode == 1) {
+            while (!br.eof()) {
+                std::vector<int32_t> mid = blockDec.decode(br);
+                if (mid.empty()) break;
+                std::vector<int32_t> side = blockDec.decode(br);
+                if (side.empty() || side.size() != mid.size()) {
+                    left.clear();
+                    right.clear();
+                    return;
+                }
+                size_t n = mid.size();
+                size_t base = left.size();
+                left.resize(base + n);
+                right.resize(base + n);
+                int32_t* lptr = left.data() + base;
+                int32_t* rptr = right.data() + base;
+                for (size_t i = 0; i < n; ++i) {
+                    int32_t m = mid[i];
+                    int32_t s = side[i];
+                    int32_t l = m + ((s + (s & 1)) >> 1);
+                    lptr[i] = l;
+                    rptr[i] = l - s;
+                }
+            }
+        } else {
+            return;
+        }
     }
 }
 
