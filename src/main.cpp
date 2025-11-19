@@ -70,7 +70,7 @@ int main(int argc, char** argv) {
             std::cerr << "Failed to read WAV: " << in_path << "\n";
             return 1;
         }
-        LAC::Encoder encoder(1024, 4, stereo_mode, sample_rate, bit_depth);
+        LAC::Encoder encoder(4, stereo_mode, sample_rate, bit_depth);
         std::vector<uint8_t> bitstream = encoder.encode(left, right);
         if (!save_file(out_path, bitstream)) {
             std::cerr << "Failed to write LAC file: " << out_path << "\n";
@@ -125,22 +125,13 @@ int main(int argc, char** argv) {
             }
         };
 
-        auto legacy_header_matches = [](const std::vector<uint8_t>& bs) -> bool {
-            static const uint8_t expected[11] = {0x4C, 0x41, 0x01, 0x02, 0x00, 0xAC, 0x44, 0x10, 0x04, 0x00, 0x00};
-            if (bs.size() < sizeof(expected)) return false;
-            for (size_t i = 0; i < sizeof(expected); ++i) {
-                if (bs[i] != expected[i]) return false;
-            }
-            return true;
-        };
-
-        auto run_pair = [&](uint32_t sample_rate, uint8_t bit_depth, bool check_legacy_header) -> bool {
+        auto run_pair = [&](uint32_t sample_rate, uint8_t bit_depth) -> bool {
             const size_t frames = std::max<size_t>(sample_rate / 20, 2048);
             std::vector<int32_t> src_left;
             std::vector<int32_t> src_right;
             generate_signal(sample_rate, bit_depth, frames, src_left, src_right);
 
-            LAC::Encoder enc_lr(1024, 4, 0, sample_rate, bit_depth);
+            LAC::Encoder enc_lr(4, 0, sample_rate, bit_depth);
             std::vector<uint8_t> bs_lr = enc_lr.encode(src_left, src_right);
             LAC::Decoder decoder;
             std::vector<int32_t> dec_lr_left, dec_lr_right;
@@ -159,12 +150,7 @@ int main(int argc, char** argv) {
                 std::cerr << "LR header mismatch sr=" << hdr_lr.sample_rate << " depth=" << int(hdr_lr.bit_depth) << "\n";
                 return false;
             }
-            if (check_legacy_header && !legacy_header_matches(bs_lr)) {
-                std::cerr << "Legacy header bytes changed\n";
-                return false;
-            }
-
-            LAC::Encoder enc_ms(1024, 4, 1, sample_rate, bit_depth);
+            LAC::Encoder enc_ms(4, 1, sample_rate, bit_depth);
             std::vector<uint8_t> bs_ms = enc_ms.encode(src_left, src_right);
             std::vector<int32_t> dec_ms_left, dec_ms_right;
             FrameHeader hdr_ms;
@@ -186,11 +172,6 @@ int main(int argc, char** argv) {
             auto lr_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
             auto ms_us = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
             bool ms_smaller = bs_ms.size() < bs_lr.size();
-            if (check_legacy_header && !ms_smaller) {
-                std::cerr << "Expected MS compression advantage on legacy test\n";
-                return false;
-            }
-
             std::cout << "Selftest sr=" << sample_rate << "Hz depth=" << int(bit_depth)
                       << " LR=" << bs_lr.size() << " bytes (" << lr_us << "us decode)"
                       << " MS=" << bs_ms.size() << " bytes (" << ms_us << "us decode)"
@@ -198,12 +179,12 @@ int main(int argc, char** argv) {
             return true;
         };
 
-        if (!run_pair(44100, 16, true)) return 1;
-        if (!run_pair(48000, 24, false)) return 1;
-        if (!run_pair(96000, 24, false)) return 1;
-        if (!run_pair(192000, 24, false)) return 1;
+        if (!run_pair(44100, 16)) return 1;
+        if (!run_pair(48000, 24)) return 1;
+        if (!run_pair(96000, 24)) return 1;
+        if (!run_pair(192000, 24)) return 1;
 
-        std::cout << "Selftest complete: legacy + PCM24 high-rate cases passed.\n";
+        std::cout << "Selftest complete: adaptive block tests passed.\n";
         return 0;
     }
 

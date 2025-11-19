@@ -12,10 +12,15 @@ public:
 
     void align_to_byte();
     bool eof() const;
+    bool has_error() const;
+    size_t bits_remaining() const;
 
 private:
     const uint8_t* data;
     size_t size;
     size_t byte_pos;
     int bit_pos;
+    bool error;
+
+    void mark_error();
 };

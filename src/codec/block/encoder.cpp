@@ -5,7 +5,7 @@
 
 namespace Block {
 
-Encoder::Encoder(int block_size, int order) : block_size(block_size), order(order) {}
+Encoder::Encoder(int order) : order(order) {}
 
 int Encoder::choose_rice_k(const std::vector<int32_t>& residual) {
     int64_t sum = 0;
@@ -35,7 +35,6 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
 
     BitWriter bw;
 
-    bw.write_bits(static_cast<uint16_t>(pcm.size()), 16);
     bw.write_bits(this->order, 8);
     bw.write_bits(k, 5);
 
