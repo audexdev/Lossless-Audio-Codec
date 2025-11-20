@@ -52,13 +52,16 @@ int main(int argc, char** argv) {
         }
         std::string in_path = argv[2];
         std::string out_path = argv[3];
-        uint8_t stereo_mode = 0;
+        uint8_t stereo_mode = 2; // default to auto; allow override via flags
         bool debug_threads = false;
         bool debug_lpc = false;
+        bool debug_stereo_est = false;
         for (int i = 4; i < argc; ++i) {
             std::string flag = argv[i];
             if (flag == "--debug-threads") {
                 debug_threads = true;
+            } else if (flag == "--debug-stereo-est") {
+                debug_stereo_est = true;
             } else if (flag == "--debug-lpc") {
                 debug_lpc = true;
             } else if (flag == "--stereo-mode=lr") {
@@ -78,7 +81,14 @@ int main(int argc, char** argv) {
             std::cerr << "Failed to read WAV: " << in_path << "\n";
             return 1;
         }
-        LAC::Encoder encoder(12, stereo_mode, sample_rate, bit_depth, debug_lpc);
+        uint8_t effective_stereo_mode = stereo_mode;
+        if (channels == 1) {
+            effective_stereo_mode = 0;
+        } else if (channels == 2) {
+            // If user did not specify, stereo_mode remains 2 (auto).
+            // If user specified lr/ms, stereo_mode is already 0/1.
+        }
+        LAC::Encoder encoder(12, effective_stereo_mode, sample_rate, bit_depth, debug_lpc, debug_stereo_est);
         LAC::ThreadCollector collector;
         LAC::ThreadCollector* collector_ptr = (debug_threads ? &collector : nullptr);
         std::vector<uint8_t> bitstream = encoder.encode(left, right, collector_ptr);

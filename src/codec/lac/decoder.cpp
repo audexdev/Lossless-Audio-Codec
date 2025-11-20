@@ -78,6 +78,7 @@ struct BlockSlice {
     ChannelSlice primary;
     ChannelSlice secondary;
     bool has_secondary = false;
+    bool mid_side = false;
 };
 
 struct BlockDecodeResult {
@@ -245,7 +246,8 @@ bool Decoder::decode(const uint8_t* data,
     }
 
     const bool isStereo = (hdr.channels == 2);
-    const bool useMidSide = isStereo && (hdr.stereo_mode == 1);
+    const bool perBlockStereo = isStereo && (hdr.stereo_mode == 2);
+    const bool forceMidSide = isStereo && (hdr.stereo_mode == 1);
 
     std::vector<size_t> blockOffsets(block_count);
     size_t running = 0;
@@ -263,14 +265,20 @@ bool Decoder::decode(const uint8_t* data,
 
     std::vector<BlockSlice> slices(block_count);
     for (uint32_t i = 0; i < block_count; ++i) {
-        if (!scan_channel(reader, block_sizes[i], slices[i].primary)) {
-            return false;
+        if (perBlockStereo) {
+            uint32_t mode_flag = reader.read_bits(8);
+            if (reader.has_error()) return false;
+            slices[i].mid_side = (mode_flag != 0);
+        } else if (forceMidSide) {
+            slices[i].mid_side = true;
+        } else {
+            slices[i].mid_side = false;
         }
+
+        if (!scan_channel(reader, block_sizes[i], slices[i].primary)) return false;
         if (isStereo) {
             slices[i].has_secondary = true;
-            if (!scan_channel(reader, block_sizes[i], slices[i].secondary)) {
-                return false;
-            }
+            if (!scan_channel(reader, block_sizes[i], slices[i].secondary)) return false;
         }
     }
 
@@ -287,9 +295,9 @@ bool Decoder::decode(const uint8_t* data,
             [this,
              idx,
              &slices,
-             &block_sizes,
              isStereo,
-             useMidSide,
+             perBlockStereo,
+             forceMidSide,
              payload]() -> BlockDecodeResult {
                 if (this->collector) {
                     this->collector->record(std::this_thread::get_id());
@@ -314,15 +322,18 @@ bool Decoder::decode(const uint8_t* data,
 
                 if (!isStereo) {
                     result.left = std::move(primary_pcm);
-                } else if (!useMidSide) {
-                    result.left = std::move(primary_pcm);
-                    result.right = std::move(secondary_pcm);
                 } else {
-                    std::vector<int32_t> left_pcm;
-                    std::vector<int32_t> right_pcm;
-                    reconstruct_mid_side(primary_pcm, secondary_pcm, left_pcm, right_pcm);
-                    result.left = std::move(left_pcm);
-                    result.right = std::move(right_pcm);
+                    bool mid_side_block = perBlockStereo ? slices[idx].mid_side : forceMidSide;
+                    if (!mid_side_block) {
+                        result.left = std::move(primary_pcm);
+                        result.right = std::move(secondary_pcm);
+                    } else {
+                        std::vector<int32_t> left_pcm;
+                        std::vector<int32_t> right_pcm;
+                        reconstruct_mid_side(primary_pcm, secondary_pcm, left_pcm, right_pcm);
+                        result.left = std::move(left_pcm);
+                        result.right = std::move(right_pcm);
+                    }
                 }
                 return result;
             }

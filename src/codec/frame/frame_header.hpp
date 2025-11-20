@@ -8,7 +8,7 @@ struct FrameHeader {
     uint16_t sync; // 0x4C41 "LA"
     uint8_t version; // 2 for adaptive block format
     uint8_t channels; // 1 or 2
-    uint8_t stereo_mode; // 0=LR,1=MS (stereo only)
+    uint8_t stereo_mode; // 0=LR,1=MS,2=per-block (stereo only)
     uint32_t sample_rate; // in hz
     uint8_t bit_depth;
     uint8_t reserved;
@@ -17,7 +17,7 @@ struct FrameHeader {
         : sync(0x4C41),
           version(2),
           channels(2),
-          stereo_mode(0),
+          stereo_mode(2),
           sample_rate(44100),
           bit_depth(16),
           reserved(0) {}
@@ -51,7 +51,7 @@ struct FrameHeader {
         if (this->sync != 0x4C41 || this->version != 2) return false;
         if (this->channels != 1 && this->channels != 2) return false;
         if (this->channels == 1 && this->stereo_mode != 0) return false;
-        if (this->stereo_mode != 0 && this->stereo_mode != 1) return false;
+        if (this->stereo_mode != 0 && this->stereo_mode != 1 && this->stereo_mode != 2) return false;
         if (!is_supported_sample_rate(this->sample_rate)) return false;
         if (this->bit_depth != 16 && this->bit_depth != 24) return false;
         return true;
