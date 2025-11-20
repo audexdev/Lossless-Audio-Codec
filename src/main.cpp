@@ -32,7 +32,7 @@ static bool save_file(const std::string& path, const std::vector<uint8_t>& data)
 
 static void usage() {
     std::cerr << "Usage:\n";
-    std::cerr << "  lac_cli encode input.wav output.lac [--stereo-mode=lr|ms] [--debug-threads]\n";
+    std::cerr << "  lac_cli encode input.wav output.lac [--stereo-mode=lr|ms] [--debug-threads] [--debug-lpc]\n";
     std::cerr << "  lac_cli decode input.lac output.wav [--debug-threads]\n";
     std::cerr << "  lac_cli selftest\n";
 }
@@ -54,10 +54,13 @@ int main(int argc, char** argv) {
         std::string out_path = argv[3];
         uint8_t stereo_mode = 0;
         bool debug_threads = false;
+        bool debug_lpc = false;
         for (int i = 4; i < argc; ++i) {
             std::string flag = argv[i];
             if (flag == "--debug-threads") {
                 debug_threads = true;
+            } else if (flag == "--debug-lpc") {
+                debug_lpc = true;
             } else if (flag == "--stereo-mode=lr") {
                 stereo_mode = 0;
             } else if (flag == "--stereo-mode=ms") {
@@ -75,7 +78,7 @@ int main(int argc, char** argv) {
             std::cerr << "Failed to read WAV: " << in_path << "\n";
             return 1;
         }
-        LAC::Encoder encoder(4, stereo_mode, sample_rate, bit_depth);
+        LAC::Encoder encoder(12, stereo_mode, sample_rate, bit_depth, debug_lpc);
         LAC::ThreadCollector collector;
         LAC::ThreadCollector* collector_ptr = (debug_threads ? &collector : nullptr);
         std::vector<uint8_t> bitstream = encoder.encode(left, right, collector_ptr);
@@ -170,7 +173,7 @@ int main(int argc, char** argv) {
             std::vector<int32_t> src_right;
             generate_signal(sample_rate, bit_depth, frames, src_left, src_right);
 
-            LAC::Encoder enc_lr(4, 0, sample_rate, bit_depth);
+            LAC::Encoder enc_lr(12, 0, sample_rate, bit_depth);
             std::vector<uint8_t> bs_lr = enc_lr.encode(src_left, src_right);
             LAC::Decoder decoder;
             std::vector<int32_t> dec_lr_left, dec_lr_right;
@@ -189,7 +192,7 @@ int main(int argc, char** argv) {
                 std::cerr << "LR header mismatch sr=" << hdr_lr.sample_rate << " depth=" << int(hdr_lr.bit_depth) << "\n";
                 return false;
             }
-            LAC::Encoder enc_ms(4, 1, sample_rate, bit_depth);
+            LAC::Encoder enc_ms(12, 1, sample_rate, bit_depth);
             std::vector<uint8_t> bs_ms = enc_ms.encode(src_left, src_right);
             std::vector<int32_t> dec_ms_left, dec_ms_right;
             FrameHeader hdr_ms;

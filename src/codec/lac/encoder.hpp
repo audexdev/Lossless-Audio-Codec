@@ -11,7 +11,7 @@ namespace LAC {
 
 class Encoder {
 public:
-    Encoder(uint8_t order, uint8_t stereo_mode = 0, uint32_t sample_rate = 44100, uint8_t bit_depth = 16);
+    Encoder(uint8_t order, uint8_t stereo_mode = 0, uint32_t sample_rate = 44100, uint8_t bit_depth = 16, bool debug_lpc = false);
 
     std::vector<uint8_t> encode(const std::vector<int32_t>& left,
                                 const std::vector<int32_t>& right,
@@ -22,6 +22,7 @@ private:
     uint8_t stereo_mode;
     uint32_t sample_rate;
     uint8_t bit_depth;
+    bool debug_lpc;
     std::vector<uint32_t> candidates;
 
     uint32_t select_block_size(const std::vector<int32_t>& left,
@@ -34,4 +35,3 @@ private:
 };
 
 } // namespace LAC
-

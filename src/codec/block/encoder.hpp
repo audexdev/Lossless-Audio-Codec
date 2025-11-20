@@ -7,7 +7,7 @@ namespace Block {
 
 class Encoder {
 public:
-    explicit Encoder(int order);
+    explicit Encoder(int order, bool debug_lpc = false);
 
     // input: int32_t PCM block
     // output: compressed block as bytes
@@ -15,6 +15,7 @@ public:
 
 private:
     int order;
+    bool debug_lpc;
 
     int choose_rice_k(const std::vector<int32_t>& residual);
 };

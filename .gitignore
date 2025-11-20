@@ -3,6 +3,7 @@
 # =========================
 build/
 build-release/
+build-tests/
 cmake-build*/
 CMakeFiles/
 CMakeCache.txt

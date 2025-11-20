@@ -32,3 +32,15 @@ add_executable(lac_cli
 )
 
 target_link_libraries(lac_cli PRIVATE lac)
+
+if(LAC_BUILD_TESTS)
+    enable_testing()
+    file(GLOB TEST_SOURCES
+        tests/*.cpp
+    )
+    add_executable(lac_tests
+        ${TEST_SOURCES}
+    )
+    target_link_libraries(lac_tests PRIVATE lac)
+    add_test(NAME lpc_tests COMMAND lac_tests)
+endif()
