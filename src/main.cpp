@@ -32,7 +32,7 @@ static bool save_file(const std::string& path, const std::vector<uint8_t>& data)
 
 static void usage() {
     std::cerr << "Usage:\n";
-    std::cerr << "  lac_cli encode input.wav output.lac [--stereo-mode=lr|ms] [--debug-threads] [--debug-lpc]\n";
+    std::cerr << "  lac_cli encode input.wav output.lac [--stereo-mode=lr|ms] [--debug-threads] [--debug-lpc] [--debug-zr] [--debug-partitions] [--no-partitioning]\n";
     std::cerr << "  lac_cli decode input.lac output.wav [--debug-threads]\n";
     std::cerr << "  lac_cli selftest\n";
 }
@@ -56,6 +56,9 @@ int main(int argc, char** argv) {
         bool debug_threads = false;
         bool debug_lpc = false;
         bool debug_stereo_est = false;
+        bool debug_zr = false;
+        bool debug_partitions = false;
+        bool partitioning_enabled = true;
         for (int i = 4; i < argc; ++i) {
             std::string flag = argv[i];
             if (flag == "--debug-threads") {
@@ -64,6 +67,12 @@ int main(int argc, char** argv) {
                 debug_stereo_est = true;
             } else if (flag == "--debug-lpc") {
                 debug_lpc = true;
+            } else if (flag == "--debug-zr") {
+                debug_zr = true;
+            } else if (flag == "--debug-partitions") {
+                debug_partitions = true;
+            } else if (flag == "--no-partitioning") {
+                partitioning_enabled = false;
             } else if (flag == "--stereo-mode=lr") {
                 stereo_mode = 0;
             } else if (flag == "--stereo-mode=ms") {
@@ -88,10 +97,29 @@ int main(int argc, char** argv) {
             // If user did not specify, stereo_mode remains 2 (auto).
             // If user specified lr/ms, stereo_mode is already 0/1.
         }
-        LAC::Encoder encoder(12, effective_stereo_mode, sample_rate, bit_depth, debug_lpc, debug_stereo_est);
+#ifndef LAC_ENABLE_PARTITIONING
+        partitioning_enabled = false;
+#endif
+        LAC::Encoder encoder(12, effective_stereo_mode, sample_rate, bit_depth, debug_lpc, debug_stereo_est, debug_zr);
+        encoder.set_partitioning_enabled(partitioning_enabled);
+        encoder.set_debug_partitions(debug_partitions);
         LAC::ThreadCollector collector;
         LAC::ThreadCollector* collector_ptr = (debug_threads ? &collector : nullptr);
         std::vector<uint8_t> bitstream = encoder.encode(left, right, collector_ptr);
+        if (debug_zr) {
+            LAC::Encoder baseline(12, effective_stereo_mode, sample_rate, bit_depth, debug_lpc, debug_stereo_est, false);
+            baseline.set_zero_run_enabled(false);
+            baseline.set_partitioning_enabled(partitioning_enabled);
+            baseline.set_debug_partitions(debug_partitions);
+            std::vector<uint8_t> baseline_bs = baseline.encode(left, right);
+            double gain = 0.0;
+            if (!baseline_bs.empty()) {
+                gain = (1.0 - static_cast<double>(bitstream.size()) / static_cast<double>(baseline_bs.size())) * 100.0;
+            }
+            std::cout << "[debug-zr] baseline_bytes=" << baseline_bs.size()
+                      << " zr_bytes=" << bitstream.size()
+                      << " gain=" << gain << "%\n";
+        }
         if (!save_file(out_path, bitstream)) {
             std::cerr << "Failed to write LAC file: " << out_path << "\n";
             return 1;

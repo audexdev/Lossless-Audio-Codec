@@ -137,13 +137,29 @@ StereoCost estimate_stereo_cost(const std::vector<int32_t>& left,
 
 namespace LAC {
 
-Encoder::Encoder(uint8_t order, uint8_t stereo_mode, uint32_t sample_rate, uint8_t bit_depth, bool debug_lpc, bool debug_stereo_est)
+Encoder::Encoder(uint8_t order, uint8_t stereo_mode, uint32_t sample_rate, uint8_t bit_depth, bool debug_lpc, bool debug_stereo_est, bool debug_zr)
     : order(order),
       stereo_mode(stereo_mode),
       sample_rate(sample_rate),
       bit_depth(bit_depth),
       debug_lpc(debug_lpc),
       debug_stereo_est(debug_stereo_est),
+      debug_zr(debug_zr),
+      zero_run_enabled(
+#ifdef LAC_ENABLE_ZERORUN
+          true
+#else
+          false
+#endif
+      ),
+      partitioning_enabled(
+#ifdef LAC_ENABLE_PARTITIONING
+          true
+#else
+          false
+#endif
+      ),
+      debug_partitions(false),
       candidates{256, 512, 1024, 2048, 4096, 8192, 16384} {}
 
 std::vector<uint8_t> Encoder::encode(
@@ -182,6 +198,38 @@ std::vector<uint8_t> Encoder::encode(
     const bool perBlockStereo = isStereo && (hdr.stereo_mode == 2);
     const uint8_t globalStereoMode = hdr.stereo_mode;
 
+#ifdef LAC_ENABLE_ZERORUN
+    if (this->zero_run_enabled && this->sample_rate >= 96000 && !blocks.empty()) {
+        const size_t guard_blocks = std::min<size_t>(blocks.size(), 4);
+        Block::Encoder estimator(this->order, this->debug_lpc, this->debug_zr);
+        estimator.set_zero_run_enabled(true);
+        uint64_t normal_bits = 0;
+        uint64_t zr_bits = 0;
+        for (size_t i = 0; i < guard_blocks; ++i) {
+            const auto& blk = blocks[i];
+            std::vector<int32_t> blockL(left.begin() + blk.start, left.begin() + blk.start + blk.size);
+            uint64_t bn = 0, bz = 0;
+            if (estimator.estimate_bits(blockL, bn, bz)) {
+                normal_bits += bn;
+                zr_bits += bz;
+            }
+            if (isStereo) {
+                std::vector<int32_t> blockR(right.begin() + blk.start, right.begin() + blk.start + blk.size);
+                if (estimator.estimate_bits(blockR, bn, bz)) {
+                    normal_bits += bn;
+                    zr_bits += bz;
+                }
+            }
+        }
+        if (normal_bits > 0) {
+            double saving = 1.0 - (static_cast<double>(zr_bits) / static_cast<double>(normal_bits));
+            if (saving < 0.02) {
+                this->zero_run_enabled = false;
+            }
+        }
+    }
+#endif
+
     std::vector<std::future<std::vector<uint8_t>>> blockTasks;
     blockTasks.reserve(blocks.size());
 
@@ -194,7 +242,11 @@ std::vector<uint8_t> Encoder::encode(
         blockTasks.emplace_back(std::async(
             launch_policy,
             [this, &left, &right, isStereo, forceMidSide, perBlockStereo, globalStereoMode, block, block_idx, collector]() -> std::vector<uint8_t> {
-                Block::Encoder blockEnc(this->order, this->debug_lpc);
+                Block::Encoder blockEnc(this->order, this->debug_lpc, this->debug_zr);
+                blockEnc.set_zero_run_enabled(this->zero_run_enabled);
+                blockEnc.set_partitioning_enabled(this->partitioning_enabled);
+                blockEnc.set_debug_partitions(this->debug_partitions);
+                blockEnc.set_debug_block_index(block_idx);
                 std::vector<uint8_t> encodedBytes;
                 const size_t start = block.start;
                 const size_t end = start + block.size;
@@ -290,6 +342,28 @@ std::vector<uint8_t> Encoder::encode(
 
     writer.flush_to_byte();
     return writer.get_buffer();
+}
+
+void Encoder::set_zero_run_enabled(bool enabled) {
+#ifdef LAC_ENABLE_ZERORUN
+    this->zero_run_enabled = enabled;
+#else
+    (void)enabled;
+    this->zero_run_enabled = false;
+#endif
+}
+
+void Encoder::set_partitioning_enabled(bool enabled) {
+#ifdef LAC_ENABLE_PARTITIONING
+    this->partitioning_enabled = enabled;
+#else
+    (void)enabled;
+    this->partitioning_enabled = false;
+#endif
+}
+
+void Encoder::set_debug_partitions(bool enabled) {
+    this->debug_partitions = enabled;
 }
 
 uint32_t Encoder::select_block_size(const std::vector<int32_t>& left,

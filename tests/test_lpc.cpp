@@ -8,6 +8,9 @@
 #include <string>
 #include <vector>
 
+void run_zerorun_tests();
+void run_partitioning_tests();
+
 namespace {
 
 constexpr int kCandidates[] = {4, 6, 8, 10, 12};
@@ -163,5 +166,7 @@ int main() {
     run_case("ramp", make_ramp(N, 50000));
     run_case("tone", make_tone(N, 440.0, 48000, 40000));
     run_case("near_silence", make_near_silence(N));
+    run_zerorun_tests();
+    run_partitioning_tests();
     return 0;
 }
