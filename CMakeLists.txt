@@ -6,8 +6,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(LAC_BUILD_TESTS "Build LAC tests" OFF)
-option(LAC_ENABLE_ZERORUN "Enable zero-run residual coder" ON)
-option(LAC_ENABLE_PARTITIONING "Enable residual partitioning" ON)
 
 # Source files
 file(GLOB_RECURSE LAC_SOURCES
@@ -35,14 +33,6 @@ add_executable(lac_cli
 
 target_link_libraries(lac_cli PRIVATE lac)
 
-if(LAC_ENABLE_ZERORUN)
-    target_compile_definitions(lac PUBLIC LAC_ENABLE_ZERORUN=1)
-    target_compile_definitions(lac_cli PUBLIC LAC_ENABLE_ZERORUN=1)
-endif()
-if(LAC_ENABLE_PARTITIONING)
-    target_compile_definitions(lac PUBLIC LAC_ENABLE_PARTITIONING=1)
-    target_compile_definitions(lac_cli PUBLIC LAC_ENABLE_PARTITIONING=1)
-endif()
 
 if(LAC_BUILD_TESTS)
     enable_testing()
@@ -53,11 +43,6 @@ if(LAC_BUILD_TESTS)
         ${TEST_SOURCES}
     )
     target_link_libraries(lac_tests PRIVATE lac)
-    if(LAC_ENABLE_ZERORUN)
-        target_compile_definitions(lac_tests PUBLIC LAC_ENABLE_ZERORUN=1)
-    endif()
-    if(LAC_ENABLE_PARTITIONING)
-        target_compile_definitions(lac_tests PUBLIC LAC_ENABLE_PARTITIONING=1)
-    endif()
+    target_compile_definitions(lac_tests PRIVATE LAC_ASSETS_DIR="${PROJECT_SOURCE_DIR}/assets")
     add_test(NAME lpc_tests COMMAND lac_tests)
 endif()

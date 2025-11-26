@@ -51,7 +51,6 @@ void roundtrip_block(const std::vector<int32_t>& pcm, bool enable_zr) {
             int order = dbg.read_bits(8);
             int k0 = dbg.read_bits(5);
             std::cerr << "dbg mode=" << mode << " order=" << order << " k0=" << k0 << std::endl;
-#ifdef LAC_ENABLE_ZERORUN
             auto read_rice_unsigned = [&](uint32_t k) -> uint32_t {
                 uint32_t q = 0;
                 while (dbg.read_bit() == 1u) {
@@ -75,7 +74,6 @@ void roundtrip_block(const std::vector<int32_t>& pcm, bool enable_zr) {
                     std::cerr << "dbg unexpected tag=" << tag << std::endl;
                 }
             }
-#endif
         }
         assert(false);
     }
@@ -202,6 +200,120 @@ void roundtrip_block(const std::vector<int32_t>& pcm, bool enable_zr) {
     }
 }
 
+void test_bin_small_block() {
+    std::vector<int32_t> pcm(64, 0);
+    for (size_t i = 0; i < pcm.size(); ++i) {
+        if (i % 8 == 0) {
+            pcm[i] = 1 << 23; // large spike to inflate k
+        } else if (i % 3 == 0) {
+            pcm[i] = 1;
+        } else if (i % 5 == 0) {
+            pcm[i] = -1;
+        }
+    }
+    Block::Encoder enc(8);
+    enc.set_zero_run_enabled(false);
+    enc.set_partitioning_enabled(false);
+    std::vector<uint8_t> buf = enc.encode(pcm);
+    assert(!buf.empty());
+    bool saw_bin_mode = false;
+    {
+        BitReader header(buf);
+        uint32_t predictor_type = header.read_bits(8);
+        uint32_t order = header.read_bits(8);
+        if (predictor_type == 2u) {
+            header.read_bits(order * 16); // LPC coeffs
+        }
+        uint32_t control = header.read_bits(8);
+        uint8_t partition_order = ((control & Block::PARTITION_FLAG) != 0u)
+            ? static_cast<uint8_t>((control & Block::PARTITION_ORDER_MASK) >> Block::PARTITION_ORDER_SHIFT)
+            : 0u;
+        if (partition_order == 0) {
+            uint32_t mode = control >> 5;
+            saw_bin_mode = (mode == 2u);
+            header.read_bits(5); // initial k
+        } else {
+            uint32_t part_count = 1u << partition_order;
+            for (uint32_t i = 0; i < part_count; ++i) {
+                uint32_t mode = header.read_bits(2);
+                header.read_bits(5); // k
+                if (mode == 2u) saw_bin_mode = true;
+            }
+        }
+    }
+    assert(saw_bin_mode);
+
+    BitReader br(buf);
+    Block::Decoder dec;
+    std::vector<int32_t> decoded;
+    assert(dec.decode(br, static_cast<uint32_t>(pcm.size()), decoded));
+    assert(decoded == pcm);
+    std::cout << "bin small block ok\n";
+}
+
+void test_bin_fallback_values() {
+    std::vector<int32_t> pcm = {0, 3, -4, 1, -1, 2, -2, 7, -8, 0, 0, 5};
+    Block::Encoder enc(8);
+    enc.set_zero_run_enabled(false);
+    std::vector<uint8_t> buf = enc.encode(pcm);
+    assert(!buf.empty());
+
+    BitReader br(buf);
+    Block::Decoder dec;
+    std::vector<int32_t> decoded;
+    assert(dec.decode(br, static_cast<uint32_t>(pcm.size()), decoded));
+    assert(decoded == pcm);
+    std::cout << "bin fallback block ok\n";
+}
+
+void test_bin_partition_modes() {
+    const size_t half = 256;
+    std::vector<int32_t> pcm(half * 2, 0);
+    for (size_t i = 0; i < half; ++i) {
+        if (i % 16 == 0) {
+            pcm[i] = 1 << 23; // occasional spikes to inflate k
+        } else if (i % 3 == 0) {
+            pcm[i] = 1;
+        }
+    }
+    for (size_t i = half; i < pcm.size(); ++i) {
+        pcm[i] = static_cast<int32_t>((i & 1) ? (1 << 15) : -(1 << 15)); // mid-level noise
+    }
+
+    Block::Encoder enc(8);
+    enc.set_zero_run_enabled(false);
+    enc.set_partitioning_enabled(true);
+    std::vector<uint8_t> buf = enc.encode(pcm);
+    assert(!buf.empty());
+
+    BitReader br(buf);
+    uint32_t predictor = br.read_bits(8);
+    uint32_t order = br.read_bits(8);
+    if (predictor == 2u) {
+        br.read_bits(order * 16); // LPC coeffs
+    }
+    uint32_t ctrl = br.read_bits(8);
+    uint8_t partition_order = ((ctrl & Block::PARTITION_FLAG) != 0u)
+        ? static_cast<uint8_t>((ctrl & Block::PARTITION_ORDER_MASK) >> Block::PARTITION_ORDER_SHIFT)
+        : 0u;
+    assert(partition_order > 0);
+    const uint32_t part_count = 1u << partition_order;
+    bool saw_bin = false;
+    for (uint32_t i = 0; i < part_count; ++i) {
+        uint32_t mode = br.read_bits(2);
+        br.read_bits(5); // k
+        if (mode == 2) saw_bin = true;
+    }
+    assert(saw_bin);
+
+    Block::Decoder dec;
+    std::vector<int32_t> decoded;
+    BitReader br_decode(buf);
+    assert(dec.decode(br_decode, static_cast<uint32_t>(pcm.size()), decoded));
+    assert(decoded == pcm);
+    std::cout << "bin partition block ok\n";
+}
+
 void roundtrip_lac(const std::vector<int32_t>& left,
                    const std::vector<int32_t>& right) {
     LAC::Encoder enc(12, 0, 44100, 16, false, false, false);
@@ -298,14 +410,6 @@ void run_zerorun_tests() {
     }
 
     {
-        // LR/MS roundtrip via full LAC path.
-        std::vector<int32_t> left = make_sparse_block(512);
-        std::vector<int32_t> right = make_sparse_block(512);
-        roundtrip_lac(left, right);
-        std::cout << "lac lr/ms roundtrip ok\n";
-    }
-
-    {
         // Compression benefit check.
         std::vector<int32_t> pcm(Block::MAX_BLOCK_SIZE, 0);
         Block::Encoder enc_zr(8);
@@ -318,5 +422,11 @@ void run_zerorun_tests() {
 
         assert(zr_buf.size() < plain_buf.size());
         std::cout << "compression comparison ok\n";
+    }
+
+    {
+        test_bin_small_block();
+        test_bin_fallback_values();
+        test_bin_partition_modes();
     }
 }

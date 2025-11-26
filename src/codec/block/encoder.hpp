@@ -20,7 +20,8 @@ public:
     void set_debug_partitions(bool enabled);
     bool estimate_bits(const std::vector<int32_t>& pcm,
                        uint64_t& bits_normal,
-                       uint64_t& bits_zr);
+                       uint64_t& bits_zr,
+                       uint64_t& bits_bin);
 
 private:
     int order;

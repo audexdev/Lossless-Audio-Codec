@@ -10,6 +10,8 @@
 
 void run_zerorun_tests();
 void run_partitioning_tests();
+void run_predictor_tests();
+void run_e2e_tests();
 
 namespace {
 
@@ -168,5 +170,7 @@ int main() {
     run_case("near_silence", make_near_silence(N));
     run_zerorun_tests();
     run_partitioning_tests();
+    run_predictor_tests();
+    run_e2e_tests();
     return 0;
 }

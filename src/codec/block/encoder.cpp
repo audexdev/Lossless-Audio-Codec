@@ -14,16 +14,8 @@ Encoder::Encoder(int order, bool debug_lpc, bool debug_zr)
     : order(order),
       debug_lpc(debug_lpc),
       debug_zr(debug_zr) {
-#ifdef LAC_ENABLE_ZERORUN
     this->zero_run_enabled = true;
-#else
-    this->zero_run_enabled = false;
-#endif
-#ifdef LAC_ENABLE_PARTITIONING
     this->partitioning_enabled = true;
-#else
-    this->partitioning_enabled = false;
-#endif
 }
 
 void Encoder::set_zero_run_enabled(bool enabled) {
@@ -46,10 +38,17 @@ namespace {
 constexpr int kOrderCandidates[] = {4, 6, 8, 10, 12};
 constexpr size_t kInitialScanCount = 256;
 constexpr uint32_t kInitialMaxK = 12;
-#ifdef LAC_ENABLE_ZERORUN
 constexpr uint32_t kZeroRunMinRun = Block::ZERO_RUN_MIN_LENGTH;
 constexpr uint32_t kZeroRunRunK = Block::ZERO_RUN_LENGTH_K;
-#endif
+constexpr uint32_t kBinTagZero = 0b00u;
+constexpr uint32_t kBinTagOne = 0b01u;
+constexpr uint32_t kBinTagTwo = 0b10u;
+constexpr uint32_t kBinTagFallback = 0b11u;
+constexpr uint8_t kPredictorFixed = 0;
+constexpr uint8_t kPredictorFir = 1;
+constexpr uint8_t kPredictorLpc = 2;
+constexpr int kFirShift = 2;
+constexpr int kFirTaps[] = {3, -1};
 
 inline uint32_t unsigned_from_residual(int32_t r) {
     return static_cast<uint32_t>((r << 1) ^ (r >> 31));
@@ -86,7 +85,6 @@ inline uint32_t zigzag_encode(int32_t v) {
     return static_cast<uint32_t>((static_cast<uint32_t>(v) << 1) ^ static_cast<uint32_t>(v >> 31));
 }
 
-#ifdef LAC_ENABLE_PARTITIONING
 inline uint8_t max_partition_order_for_block(uint32_t block_size) {
     uint8_t max_p = 0;
     for (uint8_t p = 1; p <= Block::MAX_PARTITION_ORDER; ++p) {
@@ -114,10 +112,8 @@ inline std::vector<uint32_t> partition_sizes_for_block(uint32_t block_size, uint
     sizes.back() = block_size - used;
     return sizes;
 }
-#endif
 
 bool has_zero_run(const std::vector<int32_t>& residual) {
-#ifdef LAC_ENABLE_ZERORUN
     size_t idx = 0;
     while (idx < residual.size()) {
         if (residual[idx] == 0) {
@@ -131,7 +127,6 @@ bool has_zero_run(const std::vector<int32_t>& residual) {
             ++idx;
         }
     }
-#endif
     return false;
 }
 
@@ -209,7 +204,6 @@ uint64_t estimate_adaptive_rice_bits(const std::vector<int32_t>& residual,
     return bits;
 }
 
-#ifdef LAC_ENABLE_ZERORUN
 uint64_t estimate_zerorun_bits(const std::vector<int32_t>& residual,
                                uint32_t initial_k,
                                bool stateless = false) {
@@ -264,7 +258,83 @@ uint64_t estimate_zerorun_bits(const std::vector<int32_t>& residual,
     }
     return bits;
 }
-#endif
+
+uint64_t estimate_binning_bits(const std::vector<int32_t>& residual,
+                               uint32_t initial_k,
+                               bool stateless = false) {
+    if (residual.empty()) return 0;
+    uint64_t bits = 0;
+    uint32_t current_k = initial_k;
+    uint64_t sum_u = 0;
+    uint32_t count = 0;
+
+    for (int32_t v : residual) {
+        const uint32_t u = unsigned_from_residual(v);
+        if (v == 0) {
+            bits += 2; // 00
+        } else if (v == 1 || v == -1) {
+            bits += 3; // 01 + sign
+        } else if (v == 2 || v == -2) {
+            bits += 3; // 10 + sign
+        } else {
+            bits += 2; // fallback tag
+            bits += rice_bits_for_unsigned(u, current_k);
+        }
+        sum_u += u;
+        ++count;
+        current_k = stateless
+            ? adapt_k_stateless(sum_u, count)
+            : Rice::adapt_k(sum_u, count);
+    }
+    return bits;
+}
+
+void compute_fixed_residual(const std::vector<int32_t>& pcm, int order, std::vector<int32_t>& residual) {
+    residual.resize(pcm.size(), 0);
+    if (order == 0) {
+        residual = pcm;
+        return;
+    }
+    for (int i = 0; i < order && i < static_cast<int>(pcm.size()); ++i) {
+        residual[i] = pcm[i];
+    }
+    for (size_t i = static_cast<size_t>(order); i < pcm.size(); ++i) {
+        int64_t pred = 0;
+        switch (order) {
+            case 1:
+                pred = pcm[i - 1];
+                break;
+            case 2:
+                pred = 2LL * pcm[i - 1] - pcm[i - 2];
+                break;
+            case 3:
+                pred = 3LL * pcm[i - 1] - 3LL * pcm[i - 2] + pcm[i - 3];
+                break;
+            case 4:
+                pred = 4LL * pcm[i - 1] - 6LL * pcm[i - 2] + 4LL * pcm[i - 3] - pcm[i - 4];
+                break;
+            default:
+                pred = 0;
+                break;
+        }
+        residual[i] = static_cast<int32_t>(pcm[i] - pred);
+    }
+}
+
+void compute_fir_residual(const std::vector<int32_t>& pcm, int taps, std::vector<int32_t>& residual) {
+    residual.resize(pcm.size(), 0);
+    for (int i = 0; i < taps && i < static_cast<int>(pcm.size()); ++i) {
+        residual[i] = pcm[i];
+    }
+    for (size_t i = static_cast<size_t>(taps); i < pcm.size(); ++i) {
+        int64_t pred = 0;
+        pred += static_cast<int64_t>(kFirTaps[0]) * static_cast<int64_t>(pcm[i - 1]);
+        pred += static_cast<int64_t>(kFirTaps[1]) * static_cast<int64_t>(pcm[i - 2]);
+        pred >>= kFirShift;
+        residual[i] = static_cast<int32_t>(static_cast<int64_t>(pcm[i]) - pred);
+    }
+}
+
 } // namespace
 
 int Encoder::choose_rice_k(const std::vector<int32_t>& residual) {
@@ -273,9 +343,11 @@ int Encoder::choose_rice_k(const std::vector<int32_t>& residual) {
 
 bool Encoder::estimate_bits(const std::vector<int32_t>& pcm,
                             uint64_t& bits_normal,
-                            uint64_t& bits_zr) {
+                            uint64_t& bits_zr,
+                            uint64_t& bits_bin) {
     bits_normal = 0;
     bits_zr = 0;
+    bits_bin = 0;
     const int max_valid_order = (pcm.size() > 1)
         ? static_cast<int>(std::min<size_t>(32, pcm.size() - 1))
         : 0;
@@ -285,6 +357,7 @@ bool Encoder::estimate_bits(const std::vector<int32_t>& pcm,
         int used_order = 0;
         uint64_t bit_cost = std::numeric_limits<uint64_t>::max();
         uint64_t zr_bits = std::numeric_limits<uint64_t>::max();
+        uint64_t bin_bits = std::numeric_limits<uint64_t>::max();
         long double energy = 0.0L;
         bool stable = false;
         std::vector<int16_t> coeffs_q15;
@@ -317,17 +390,16 @@ bool Encoder::estimate_bits(const std::vector<int32_t>& pcm,
 
         uint32_t adaptive_k = estimate_initial_k(eval.residual);
         eval.bit_cost = estimate_adaptive_rice_bits(eval.residual, adaptive_k);
-#ifdef LAC_ENABLE_ZERORUN
         const bool allow_zr = this->zero_run_enabled && has_zero_run(eval.residual);
         eval.zr_bits = allow_zr
             ? estimate_zerorun_bits(eval.residual, adaptive_k)
             : eval.bit_cost;
-#else
-        eval.zr_bits = eval.bit_cost;
-#endif
-        const uint64_t candidate_score = (this->zero_run_enabled && has_zero_run(eval.residual))
-            ? std::min(eval.bit_cost, eval.zr_bits)
-            : eval.bit_cost;
+        eval.bin_bits = estimate_binning_bits(eval.residual, adaptive_k);
+        uint64_t candidate_score = eval.bit_cost;
+        if (this->zero_run_enabled && has_zero_run(eval.residual)) {
+            candidate_score = std::min(candidate_score, eval.zr_bits);
+        }
+        candidate_score = std::min(candidate_score, eval.bin_bits);
 
         if (candidate_score < best_metric ||
             (candidate_score == best_metric && eval.used_order < best.used_order)) {
@@ -355,28 +427,22 @@ bool Encoder::estimate_bits(const std::vector<int32_t>& pcm,
         uint32_t adaptive_k = estimate_initial_k(best.residual);
         best.bit_cost = estimate_adaptive_rice_bits(best.residual, adaptive_k);
         best.stable = used_order > 0;
-#ifdef LAC_ENABLE_ZERORUN
         const bool allow_zr = this->zero_run_enabled && has_zero_run(best.residual);
         best.zr_bits = allow_zr
             ? estimate_zerorun_bits(best.residual, adaptive_k)
             : best.bit_cost;
         best_metric = (allow_zr ? std::min(best.bit_cost, best.zr_bits) : best.bit_cost);
-#else
-        best.zr_bits = best.bit_cost;
-        best_metric = best.bit_cost;
-#endif
+        best.bin_bits = estimate_binning_bits(best.residual, adaptive_k);
+        best_metric = std::min(best_metric, best.bin_bits);
     }
 
     uint32_t best_k = estimate_initial_k(best.residual);
     bits_normal = estimate_adaptive_rice_bits(best.residual, best_k);
-#ifdef LAC_ENABLE_ZERORUN
     const bool allow_zr = this->zero_run_enabled && has_zero_run(best.residual);
     bits_zr = allow_zr
         ? estimate_zerorun_bits(best.residual, best_k)
         : bits_normal;
-#else
-    bits_zr = bits_normal;
-#endif
+    bits_bin = estimate_binning_bits(best.residual, best_k);
     return !best.residual.empty();
 }
 
@@ -385,109 +451,107 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
         ? static_cast<int>(std::min<size_t>(32, pcm.size() - 1))
         : 0;
 
-    struct CandidateEval {
-        int target_order = 0;
-        int used_order = 0;
-        uint64_t bit_cost = std::numeric_limits<uint64_t>::max();
+    struct PredictorEval {
+        uint8_t predictor_type = kPredictorLpc;
+        int order_param = 0; // fixed order, fir taps, or lpc order
+        int used_order = 0; // for LPC stability info
+        uint64_t rice_bits = std::numeric_limits<uint64_t>::max();
         uint64_t zr_bits = std::numeric_limits<uint64_t>::max();
+        uint64_t bin_bits = std::numeric_limits<uint64_t>::max();
+        uint64_t best_bits = std::numeric_limits<uint64_t>::max();
         long double energy = 0.0L;
-        bool stable = false;
+        bool stable = true;
         std::vector<int16_t> coeffs_q15;
         std::vector<int32_t> residual;
     };
 
-    struct DebugEval {
-        int target_order = 0;
-        int used_order = 0;
-        uint64_t bit_cost = 0;
-        uint64_t zr_bits = 0;
-        bool stable = false;
-        long double energy = 0.0L;
-    };
+    std::vector<PredictorEval> candidates;
 
-    CandidateEval best;
-    uint64_t best_metric = std::numeric_limits<uint64_t>::max();
-    std::vector<DebugEval> debug_evals;
-    debug_evals.reserve(sizeof(kOrderCandidates) / sizeof(kOrderCandidates[0]));
+    // Fixed predictors 0-4.
+    for (int fo = 0; fo <= 4; ++fo) {
+        PredictorEval ev;
+        ev.predictor_type = kPredictorFixed;
+        ev.order_param = fo;
+        compute_fixed_residual(pcm, fo, ev.residual);
+        uint32_t k0 = estimate_initial_k(ev.residual);
+        ev.rice_bits = estimate_adaptive_rice_bits(ev.residual, k0);
+        ev.zr_bits = estimate_zerorun_bits(ev.residual, k0);
+        ev.bin_bits = estimate_binning_bits(ev.residual, k0);
+        ev.best_bits = std::min(ev.rice_bits, std::min(ev.zr_bits, ev.bin_bits));
+        candidates.push_back(std::move(ev));
+    }
 
+    // FIR predictor (2 taps predefined).
+    {
+        PredictorEval ev;
+        ev.predictor_type = kPredictorFir;
+        ev.order_param = 2;
+        compute_fir_residual(pcm, ev.order_param, ev.residual);
+        uint32_t k0 = estimate_initial_k(ev.residual);
+        ev.rice_bits = estimate_adaptive_rice_bits(ev.residual, k0);
+        ev.zr_bits = estimate_zerorun_bits(ev.residual, k0);
+        ev.bin_bits = estimate_binning_bits(ev.residual, k0);
+        ev.best_bits = std::min(ev.rice_bits, std::min(ev.zr_bits, ev.bin_bits));
+        candidates.push_back(std::move(ev));
+    }
+
+    // LPC predictors.
     for (int cand : kOrderCandidates) {
         if (cand > max_valid_order) continue;
         LPC lpc(cand);
-        CandidateEval eval;
-        eval.target_order = cand;
+        PredictorEval ev;
+        ev.predictor_type = kPredictorLpc;
+        ev.order_param = cand;
 
         int used_order = 0;
         long double energy = 0.0L;
-        eval.stable = lpc.analyze_block_q15(pcm, eval.coeffs_q15, used_order, &energy);
-        eval.used_order = used_order;
-        eval.energy = energy;
-
-        if (!eval.stable || eval.used_order == 0) {
-            debug_evals.push_back({eval.target_order, eval.used_order, eval.bit_cost, eval.zr_bits, eval.stable, eval.energy});
+        ev.stable = lpc.analyze_block_q15(pcm, ev.coeffs_q15, used_order, &energy);
+        ev.used_order = used_order;
+        ev.energy = energy;
+        if (!ev.stable || ev.used_order == 0) {
             continue;
         }
 
-        eval.residual.resize(pcm.size());
+        ev.residual.resize(pcm.size());
         if (!pcm.empty()) {
-            lpc.compute_residual_q15(pcm, eval.coeffs_q15, eval.residual);
+            lpc.compute_residual_q15(pcm, ev.coeffs_q15, ev.residual);
         }
+        uint32_t k0 = estimate_initial_k(ev.residual);
+        ev.rice_bits = estimate_adaptive_rice_bits(ev.residual, k0);
+        ev.zr_bits = estimate_zerorun_bits(ev.residual, k0);
+        ev.bin_bits = estimate_binning_bits(ev.residual, k0);
+        ev.best_bits = std::min(ev.rice_bits, std::min(ev.zr_bits, ev.bin_bits));
+        candidates.push_back(std::move(ev));
+    }
 
-        eval.bit_cost = estimate_rice_bits(eval.residual);
-        uint64_t candidate_score = eval.bit_cost;
-#ifdef LAC_ENABLE_ZERORUN
-        eval.zr_bits = estimate_zerorun_bits(eval.residual, estimate_initial_k(eval.residual));
-        if (this->zero_run_enabled) {
-            candidate_score = std::min(candidate_score, eval.zr_bits);
-        }
-#else
-        eval.zr_bits = eval.bit_cost;
-#endif
-        debug_evals.push_back({eval.target_order, eval.used_order, eval.bit_cost, eval.zr_bits, eval.stable, eval.energy});
+    // Ensure at least one candidate (fallback fixed-0).
+    if (candidates.empty()) {
+        PredictorEval ev;
+        ev.predictor_type = kPredictorFixed;
+        ev.order_param = 0;
+        ev.residual = pcm;
+        uint32_t k0 = estimate_initial_k(ev.residual);
+        ev.rice_bits = estimate_adaptive_rice_bits(ev.residual, k0);
+        ev.zr_bits = estimate_zerorun_bits(ev.residual, k0);
+        ev.bin_bits = estimate_binning_bits(ev.residual, k0);
+        ev.best_bits = std::min(ev.rice_bits, std::min(ev.zr_bits, ev.bin_bits));
+        candidates.push_back(std::move(ev));
+    }
 
-        if (candidate_score < best_metric ||
-            (candidate_score == best_metric && eval.used_order < best.used_order)) {
-            best = eval;
-            best_metric = candidate_score;
+    PredictorEval best = candidates.front();
+    for (const auto& ev : candidates) {
+        if (ev.best_bits < best.best_bits ||
+            (ev.best_bits == best.best_bits && ev.predictor_type < best.predictor_type)) {
+            best = ev;
         }
     }
 
-    if (best.used_order == 0) {
-        const int fallback_order = std::max(1, std::min(this->order, max_valid_order));
-        LPC lpc_fallback(fallback_order);
-        int used_order = 0;
-        long double energy = 0.0L;
-        std::vector<int16_t> coeffs_q15;
-        lpc_fallback.analyze_block_q15(pcm, coeffs_q15, used_order, &energy);
-        std::vector<int32_t> residual(pcm.size());
-        if (!pcm.empty()) {
-            lpc_fallback.compute_residual_q15(pcm, coeffs_q15, residual);
-        }
-        best.target_order = fallback_order;
-        best.used_order = used_order;
-        best.energy = energy;
-        best.coeffs_q15 = std::move(coeffs_q15);
-        best.residual = std::move(residual);
-        best.bit_cost = estimate_rice_bits(best.residual);
-        best.stable = used_order > 0;
-#ifdef LAC_ENABLE_ZERORUN
-        best.zr_bits = estimate_zerorun_bits(best.residual, estimate_initial_k(best.residual));
-        best_metric = this->zero_run_enabled ? std::min(best.bit_cost, best.zr_bits) : best.bit_cost;
-#else
-        best.zr_bits = best.bit_cost;
-        best_metric = best.bit_cost;
-#endif
-    }
-
-    int chosen_order = best.used_order > 0 ? best.used_order : this->order;
-    if (chosen_order > max_valid_order && max_valid_order > 0) {
-        chosen_order = max_valid_order;
-    }
-    if (chosen_order <= 0) {
-        chosen_order = 1;
-    }
+    const int chosen_order = (best.predictor_type == kPredictorLpc)
+        ? std::max(1, std::min(best.order_param, max_valid_order))
+        : best.order_param;
 
     struct PartitionChoice {
-        uint8_t residual_mode = 0; // 0 = rice, 1 = zero-run
+        uint8_t residual_mode = 0; // 0 = rice, 1 = zero-run, 2 = bin
         uint32_t initial_k = 0;
         uint64_t bits = 0;
         uint32_t length = 0;
@@ -496,56 +560,48 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
     const uint32_t block_size = static_cast<uint32_t>(best.residual.size());
     const uint32_t base_initial_k = static_cast<uint32_t>(this->choose_rice_k(best.residual));
     uint64_t base_bits_normal = estimate_adaptive_rice_bits(best.residual, base_initial_k);
-#ifdef LAC_ENABLE_ZERORUN
     const bool has_run = has_zero_run(best.residual);
     const bool allow_zr_global = this->zero_run_enabled && has_run;
     uint64_t base_bits_zr = allow_zr_global ? estimate_zerorun_bits(best.residual, base_initial_k) : base_bits_normal;
-    bool use_zero_run_base = allow_zr_global && (base_bits_zr < base_bits_normal);
+    uint64_t base_bits_bin = estimate_binning_bits(best.residual, base_initial_k);
+    uint8_t base_mode = 0; // 0=rice,1=zr,2=bin
+    uint64_t base_bits_best = base_bits_normal;
+    if (allow_zr_global && base_bits_zr <= base_bits_best) {
+        base_bits_best = base_bits_zr;
+        base_mode = 1;
+    }
+    if (base_bits_bin < base_bits_best) {
+        base_bits_best = base_bits_bin;
+        base_mode = 2;
+    }
     if (this->debug_zr && this->zero_run_enabled) {
         std::cerr << "[zr-est] block=" << this->block_index
                   << " normal=" << base_bits_normal
                   << " zr=" << base_bits_zr
-                  << " chosen=" << (use_zero_run_base ? "ZR" : "RICE")
+                  << " bin=" << base_bits_bin
+                  << " chosen=" << static_cast<int>(base_mode)
                   << " has_run=" << has_run
                   << "\n";
     }
-#else
-    const bool allow_zr_global = false;
-    uint64_t base_bits_zr = base_bits_normal;
-    bool use_zero_run_base = false;
-#endif
 
     PartitionChoice legacy_choice{
-        static_cast<uint8_t>(use_zero_run_base ? 1 : 0),
+        base_mode,
         base_initial_k,
-        (use_zero_run_base ? base_bits_zr : base_bits_normal),
+        base_bits_best,
         block_size
     };
 
-#ifdef LAC_ENABLE_ZERORUN
-    const bool include_mode_byte = this->zero_run_enabled;
-#else
-    const bool include_mode_byte = false;
-#endif
-
-    auto metadata_bits = [&](uint8_t partition_order, uint32_t partition_count, bool has_mode_byte) -> uint64_t {
-        uint64_t bits = 0;
-        if (partition_order > 0) {
-            bits += 8; // control byte with partition flag/order
-            bits += static_cast<uint64_t>(partition_count) * 6ull; // mode + k per partition
-        } else {
-            if (has_mode_byte) bits += 8;
-            bits += 5; // initial k
-        }
+    auto metadata_bits = [&](uint8_t partition_order, uint32_t partition_count) -> uint64_t {
+        uint64_t bits = 8; // control byte always present
+        bits += static_cast<uint64_t>(partition_count) * 7ull; // 2-bit mode + 5-bit k per partition
         return bits;
     };
 
     uint8_t best_partition_order = 0;
     std::vector<PartitionChoice> best_partitions = {legacy_choice};
-    uint64_t best_total_bits = legacy_choice.bits + metadata_bits(0, 1, include_mode_byte);
+    uint64_t best_total_bits = legacy_choice.bits + metadata_bits(0, 1);
     best_total_bits += (8u - (best_total_bits & 7u)) & 7u;
 
-#ifdef LAC_ENABLE_PARTITIONING
     if (this->partitioning_enabled && block_size >= Block::MIN_PARTITION_SIZE) {
         const uint8_t max_p = max_partition_order_for_block(block_size);
         const bool allow_partition_zr = allow_zr_global;
@@ -562,21 +618,24 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
                 const std::vector<int32_t> segment(best.residual.begin() + offset, best.residual.begin() + offset + len);
                 pc.initial_k = estimate_initial_k(segment);
                 const uint64_t normal_bits = estimate_adaptive_rice_bits(segment, pc.initial_k, true);
-#ifdef LAC_ENABLE_ZERORUN
+                const uint64_t bin_bits = estimate_binning_bits(segment, pc.initial_k, true);
                 const bool allow_zr = allow_partition_zr && has_zero_run(segment);
                 const uint64_t zr_bits = allow_zr ? estimate_zerorun_bits(segment, pc.initial_k, true) : normal_bits;
-                pc.residual_mode = (allow_zr && zr_bits < normal_bits) ? 1 : 0;
-                pc.bits = (pc.residual_mode == 1) ? zr_bits : normal_bits;
-#else
                 pc.residual_mode = 0;
                 pc.bits = normal_bits;
-#endif
+                if (allow_zr && zr_bits < pc.bits) {
+                    pc.residual_mode = 1;
+                    pc.bits = zr_bits;
+                }
+                if (bin_bits < pc.bits) {
+                    pc.residual_mode = 2;
+                    pc.bits = bin_bits;
+                }
                 bits_sum += pc.bits;
                 choices.push_back(pc);
                 offset += len;
             }
-            const bool mode_byte_for_p = (p == 0) ? include_mode_byte : false;
-            uint64_t meta = metadata_bits(p, static_cast<uint32_t>(choices.size()), mode_byte_for_p);
+            uint64_t meta = metadata_bits(p, static_cast<uint32_t>(choices.size()));
             uint64_t total = bits_sum + meta;
             total += (8u - (total & 7u)) & 7u;
             if (this->debug_partitions) {
@@ -600,7 +659,6 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
                       << "\n";
         }
     }
-#endif
 
     Rice rice;
     BitWriter bw;
@@ -646,7 +704,64 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
         }
     };
 
-#ifdef LAC_ENABLE_ZERORUN
+    auto encode_bin_partition = [&](size_t start, size_t length, uint32_t initial_k_value, size_t part_index) {
+        uint32_t current_k = initial_k_value;
+        uint64_t sum_u = 0;
+        uint32_t count = 0;
+        size_t token_idx = 0;
+
+        for (size_t i = 0; i < length; ++i) {
+            const size_t pos = start + i;
+            const int32_t v = best.residual[pos];
+            const uint32_t u = unsigned_from_residual(v);
+            if (v == 0) {
+                bw.write_bits(kBinTagZero, 2);
+                if (this->debug_partitions && token_idx < 12) {
+                    std::cerr << "[part-enc] p=" << part_index
+                              << " tok=" << token_idx
+                              << " tag=bin0"
+                              << " k=" << current_k << "\n";
+                }
+            } else if (v == 1 || v == -1) {
+                bw.write_bits(kBinTagOne, 2);
+                bw.write_bit(v < 0 ? 1u : 0u);
+                if (this->debug_partitions && token_idx < 12) {
+                    std::cerr << "[part-enc] p=" << part_index
+                              << " tok=" << token_idx
+                              << " tag=bin1"
+                              << " sign=" << (v < 0 ? "-" : "+")
+                              << " k=" << current_k << "\n";
+                }
+            } else if (v == 2 || v == -2) {
+                bw.write_bits(kBinTagTwo, 2);
+                bw.write_bit(v < 0 ? 1u : 0u);
+                if (this->debug_partitions && token_idx < 12) {
+                    std::cerr << "[part-enc] p=" << part_index
+                              << " tok=" << token_idx
+                              << " tag=bin2"
+                              << " sign=" << (v < 0 ? "-" : "+")
+                              << " k=" << current_k << "\n";
+                }
+            } else {
+                bw.write_bits(kBinTagFallback, 2);
+                rice.encode(bw, v, current_k);
+                if (this->debug_partitions && token_idx < 12) {
+                    std::cerr << "[part-enc] p=" << part_index
+                              << " tok=" << token_idx
+                              << " tag=bin-fb"
+                              << " k=" << current_k
+                              << " u=" << u << "\n";
+                }
+            }
+            sum_u += u;
+            ++count;
+            current_k = use_stateless_adapt
+                ? adapt_k_stateless(sum_u, count)
+                : Rice::adapt_k(sum_u, count);
+            ++token_idx;
+        }
+    };
+
     auto encode_zr_partition = [&](size_t start, size_t length, uint32_t initial_k_value, size_t part_index) {
         constexpr uint32_t kTagNormal = 0b00u;
         constexpr uint32_t kTagRun = 0b01u;
@@ -745,87 +860,50 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
             ++token_idx;
         }
     };
-#endif
 
-    if (best_partition_order == 0) {
-        if (include_mode_byte) {
-            bw.write_bits(legacy_choice.residual_mode ? 1u : 0u, 8);
-            if (this->debug_zr) {
-                std::cerr << "[zr-enc] block=" << this->block_index
-                          << " flag=" << (legacy_choice.residual_mode ? 1 : 0)
-                          << "\n";
-            }
-        }
-        bw.write_bits(static_cast<uint32_t>(chosen_order), 8);
-        bw.write_bits(base_initial_k, 5);
+    uint8_t control_mode = static_cast<uint8_t>(best_partitions.empty() ? 0 : best_partitions.front().residual_mode);
+    uint8_t control_byte = static_cast<uint8_t>((control_mode & 0x03u) << 5);
+    if (best_partition_order > 0) {
+        control_byte |= Block::PARTITION_FLAG;
+        control_byte |= static_cast<uint8_t>((best_partition_order & Block::PARTITION_ORDER_MASK) << Block::PARTITION_ORDER_SHIFT);
+    }
 
+    // Per-channel layout:
+    // predictor_type (8) | predictor_order (8) | LPC coeffs | residual_control (8) |
+    // [residual_mode:2 | initial_k:5] * partitions | residual bitstream | byte align.
+    bw.write_bits(static_cast<uint32_t>(best.predictor_type), 8);
+    bw.write_bits(static_cast<uint32_t>(chosen_order), 8);
+    if (best.predictor_type == kPredictorLpc) {
         for (int i = 1; i <= chosen_order; ++i) {
             bw.write_bits(uint16_t(best.coeffs_q15[i]), 16);
         }
+    }
 
-        const bool use_zero_run = (legacy_choice.residual_mode == 1);
-        if (!use_zero_run) {
-            std::vector<uint32_t> rice_unsigned(best.residual.size());
-            std::vector<uint64_t> rice_prefix(best.residual.size());
-            if (!best.residual.empty()) {
-                SIMD::rice_unsigned_simd_or_scalar(best.residual.data(),
-                                                   rice_unsigned.data(),
-                                                   best.residual.size());
-                SIMD::rice_prefix_sum_simd_or_scalar(rice_unsigned.data(),
-                                                     rice_prefix.data(),
-                                                     best.residual.size());
-            }
+    bw.write_bits(control_byte, 8);
+    for (const auto& part : best_partitions) {
+        bw.write_bits(part.residual_mode, 2);
+        bw.write_bits(part.initial_k, 5);
+    }
 
-            std::vector<uint32_t> rice_k_next(best.residual.size());
-            for (size_t i = 0; i < best.residual.size(); ++i) {
-                rice_k_next[i] = Rice::adapt_k(rice_prefix[i],
-                                               static_cast<uint32_t>(i + 1));
+    size_t offset = 0;
+    size_t part_idx = 0;
+    for (const auto& part : best_partitions) {
+        if (this->debug_partitions && best_partition_order > 0) {
+            std::cerr << "[part-samples] idx=" << part_idx << " first=";
+            for (size_t j = 0; j < std::min<size_t>(8, part.length) && offset + j < best.residual.size(); ++j) {
+                std::cerr << best.residual[offset + j] << (j + 1 < std::min<size_t>(8, part.length) ? "," : "");
             }
-
-            uint32_t current_k = base_initial_k;
-            for (size_t i = 0; i < best.residual.size(); ++i) {
-                rice.encode(bw, best.residual[i], current_k);
-                current_k = rice_k_next[i];
-            }
+            std::cerr << "\n";
+        }
+        if (part.residual_mode == 0) {
+            encode_rice_partition(offset, part.length, part.initial_k);
+        } else if (part.residual_mode == 1) {
+            encode_zr_partition(offset, part.length, part.initial_k, part_idx);
         } else {
-#ifdef LAC_ENABLE_ZERORUN
-            encode_zr_partition(0, best.residual.size(), base_initial_k, 0);
-#endif
+            encode_bin_partition(offset, part.length, part.initial_k, part_idx);
         }
-    } else {
-        const uint8_t control_byte = static_cast<uint8_t>(Block::PARTITION_FLAG |
-                                                          (best_partition_order << Block::PARTITION_ORDER_SHIFT));
-        bw.write_bits(control_byte, 8);
-        bw.write_bits(static_cast<uint32_t>(chosen_order), 8);
-        for (int i = 1; i <= chosen_order; ++i) {
-            bw.write_bits(uint16_t(best.coeffs_q15[i]), 16);
-        }
-
-        for (const auto& part : best_partitions) {
-            bw.write_bit(part.residual_mode);
-            bw.write_bits(part.initial_k, 5);
-        }
-
-        size_t offset = 0;
-        size_t part_idx = 0;
-        for (const auto& part : best_partitions) {
-            if (this->debug_partitions) {
-                std::cerr << "[part-samples] idx=" << part_idx << " first=";
-                for (size_t j = 0; j < std::min<size_t>(8, part.length) && offset + j < best.residual.size(); ++j) {
-                    std::cerr << best.residual[offset + j] << (j + 1 < std::min<size_t>(8, part.length) ? "," : "");
-                }
-                std::cerr << "\n";
-            }
-            if (part.residual_mode == 0) {
-                encode_rice_partition(offset, part.length, part.initial_k);
-            } else {
-#ifdef LAC_ENABLE_ZERORUN
-                encode_zr_partition(offset, part.length, part.initial_k, part_idx);
-#endif
-            }
-            offset += part.length;
-            ++part_idx;
-        }
+        offset += part.length;
+        ++part_idx;
     }
 
     bw.flush_to_byte();
@@ -834,25 +912,13 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
         std::cerr << "[debug-lpc] block=" << pcm.size()
                   << " energy=" << static_cast<double>(best.energy)
                   << " chosen_order=" << chosen_order
-                  << " est_bits=" << std::min(best.bit_cost, best.zr_bits)
-                  << " rice_bits=" << best.bit_cost
-#ifdef LAC_ENABLE_ZERORUN
+                  << " predictor=" << static_cast<int>(best.predictor_type)
+                  << " est_bits=" << best.best_bits
+                  << " rice_bits=" << best.rice_bits
                   << " zr_bits=" << best.zr_bits
-#endif
-#ifdef LAC_ENABLE_PARTITIONING
+                  << " bin_bits=" << best.bin_bits
                   << " part_order=" << static_cast<uint32_t>(best_partition_order)
-#endif
                   << "\n";
-        for (const auto& e : debug_evals) {
-            std::cerr << "  cand=" << e.target_order
-                      << " used=" << e.used_order
-                      << " bits=" << e.bit_cost
-#ifdef LAC_ENABLE_ZERORUN
-                      << " zr=" << e.zr_bits
-#endif
-                      << (e.stable ? "" : " unstable")
-                      << "\n";
-        }
     }
 
     return bw.get_buffer();

@@ -97,9 +97,6 @@ int main(int argc, char** argv) {
             // If user did not specify, stereo_mode remains 2 (auto).
             // If user specified lr/ms, stereo_mode is already 0/1.
         }
-#ifndef LAC_ENABLE_PARTITIONING
-        partitioning_enabled = false;
-#endif
         LAC::Encoder encoder(12, effective_stereo_mode, sample_rate, bit_depth, debug_lpc, debug_stereo_est, debug_zr);
         encoder.set_partitioning_enabled(partitioning_enabled);
         encoder.set_debug_partitions(debug_partitions);
