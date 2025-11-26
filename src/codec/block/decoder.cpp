@@ -4,6 +4,8 @@
 #include "codec/bitstream/bit_reader.hpp"
 #include "codec/lpc/lpc.hpp"
 #include "codec/rice/rice.hpp"
+#include "utils/logger.hpp"
+#include <sstream>
 
 namespace Block {
 
@@ -101,7 +103,7 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
                 uint32_t tag_prefix = reader.read_bit();
                 if (reader.has_error()) {
                     if (debug) {
-                        std::cerr << "[part-dec] read error before tag idx=" << idx << "\n";
+                        LAC_DEBUG_LOG("[part-dec] read error before tag idx=" << idx << "\n");
                     }
                     return false;
                 }
@@ -113,95 +115,95 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
                 }
                 if (reader.has_error()) {
                     if (debug) {
-                        std::cerr << "[part-dec] read error before tag idx=" << idx << "\n";
+                        LAC_DEBUG_LOG("[part-dec] read error before tag idx=" << idx << "\n");
                     }
                     return false;
                 }
                 if (debug) {
-                    std::cerr << "[part-dec] tag=" << tag << " idx=" << idx << " k=" << current_k << "\n";
+                    LAC_DEBUG_LOG("[part-dec] tag=" << tag << " idx=" << idx << " k=" << current_k << "\n");
                 }
                 if (tag == kTagNormal) {
                     uint32_t u = read_rice_unsigned(reader, current_k);
                     if (reader.has_error() || idx >= samples) {
                         if (debug) {
-                            std::cerr << "[part-dec] read error in normal idx=" << idx << "\n";
+                            LAC_DEBUG_LOG("[part-dec] read error in normal idx=" << idx << "\n");
                         }
                         break;
                     }
                     residual[offset + idx++] = static_cast<int32_t>((u >> 1) ^ -static_cast<int32_t>(u & 1u));
                     if (debug && idx <= 8) {
-                        std::cerr << "[part-val] idx=" << (offset + idx - 1)
-                                  << " v=" << residual[offset + idx - 1]
-                                  << " k=" << current_k << "\n";
+                        LAC_DEBUG_LOG("[part-val] idx=" << (offset + idx - 1)
+                                      << " v=" << residual[offset + idx - 1]
+                                      << " k=" << current_k << "\n");
                     }
                     sumU += u;
                     ++count;
                     current_k = adapt_k(sumU, count, stateless);
                     if (debug_zr) {
-                        std::cerr << "[zr-decode] normal idx=" << (offset + idx - 1) << " err=" << reader.has_error() << "\n";
+                        LAC_DEBUG_LOG("[zr-decode] normal idx=" << (offset + idx - 1) << " err=" << reader.has_error() << "\n");
                     }
                 } else if (tag == kTagRun) {
                     uint32_t run_len = read_rice_unsigned(reader, Block::ZERO_RUN_LENGTH_K) + Block::ZERO_RUN_MIN_LENGTH;
                     if (idx + run_len > samples) {
                         if (debug) {
-                            std::cerr << "[part-dec] run overflow idx=" << idx
-                                      << " run=" << run_len
-                                      << " samples=" << samples << "\n";
+                            LAC_DEBUG_LOG("[part-dec] run overflow idx=" << idx
+                                          << " run=" << run_len
+                                          << " samples=" << samples << "\n");
                         }
                         return false;
                     }
                     for (uint32_t j = 0; j < run_len; ++j) {
                         residual[offset + idx++] = 0;
                         if (debug && idx <= 8) {
-                            std::cerr << "[part-val] idx=" << (offset + idx - 1)
-                                      << " v=0 k=" << current_k << "\n";
+                            LAC_DEBUG_LOG("[part-val] idx=" << (offset + idx - 1)
+                                          << " v=0 k=" << current_k << "\n");
                         }
                         ++count;
                         current_k = adapt_k(sumU, count, stateless);
                     }
                     if (debug_zr) {
-                        std::cerr << "[zr-decode] run len=" << run_len << " idx=" << idx << " err=" << reader.has_error() << "\n";
+                        LAC_DEBUG_LOG("[zr-decode] run len=" << run_len << " idx=" << idx << " err=" << reader.has_error() << "\n");
                     }
                 } else if (tag == kTagEscape) {
                     if (idx >= samples) {
                         if (debug) {
-                            std::cerr << "[part-dec] escape overflow idx=" << idx
-                                      << " samples=" << samples << "\n";
+                            LAC_DEBUG_LOG("[part-dec] escape overflow idx=" << idx
+                                          << " samples=" << samples << "\n");
                         }
                         return false;
                     }
                     uint32_t zz = reader.read_bits(32);
                     if (reader.has_error()) {
                         if (debug) {
-                            std::cerr << "[part-dec] read error escape idx=" << idx << "\n";
+                            LAC_DEBUG_LOG("[part-dec] read error escape idx=" << idx << "\n");
                         }
                         break;
                     }
                     int32_t value = zigzag_decode(zz);
                     residual[offset + idx++] = value;
                     if (debug && idx <= 8) {
-                        std::cerr << "[part-val] idx=" << (offset + idx - 1)
-                                  << " v=" << value
-                                  << " k=" << current_k << "\n";
+                        LAC_DEBUG_LOG("[part-val] idx=" << (offset + idx - 1)
+                                      << " v=" << value
+                                      << " k=" << current_k << "\n");
                     }
                     uint32_t u = static_cast<uint32_t>((value << 1) ^ (value >> 31));
                     sumU += u;
                     ++count;
                     current_k = adapt_k(sumU, count, stateless);
                     if (debug_zr) {
-                        std::cerr << "[zr-decode] escape idx=" << idx << " val=" << value << " err=" << reader.has_error() << "\n";
+                        LAC_DEBUG_LOG("[zr-decode] escape idx=" << idx << " val=" << value << " err=" << reader.has_error() << "\n");
                     }
                 } else {
                     if (debug) {
-                        std::cerr << "[part-dec] invalid tag=" << tag
-                                  << " idx=" << idx
-                                  << " bits_left=" << reader.bits_remaining() << "\n";
+                        LAC_DEBUG_LOG("[part-dec] invalid tag=" << tag
+                                      << " idx=" << idx
+                                      << " bits_left=" << reader.bits_remaining() << "\n");
                     }
                     return false;
                 }
             }
             if (idx != samples && debug) {
-                std::cerr << "[part-dec] idx_mismatch idx=" << idx << " samples=" << samples << "\n";
+                LAC_DEBUG_LOG("[part-dec] idx_mismatch idx=" << idx << " samples=" << samples << "\n");
             }
             return idx == samples;
         }
@@ -338,26 +340,28 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
     }
 
     if (debug_part) {
-        std::cerr << "[block-hdr] predict=" << static_cast<int>(predictor_type)
-                  << " order=" << order
-                  << " ctrl=" << static_cast<int>(control)
-                  << " mode=" << static_cast<int>(control_mode)
-                  << " pflag=" << (partition_flag ? 1 : 0)
-                  << " porder=" << static_cast<int>(partition_order)
-                  << " parts=" << partition_count
-                  << " block=" << block_size
-                  << "\n";
-        std::cerr << "[part-decode] modes/k:";
+        LAC_DEBUG_LOG("[block-hdr] predict=" << static_cast<int>(predictor_type)
+                      << " order=" << order
+                      << " ctrl=" << static_cast<int>(control)
+                      << " mode=" << static_cast<int>(control_mode)
+                      << " pflag=" << (partition_flag ? 1 : 0)
+                      << " porder=" << static_cast<int>(partition_order)
+                      << " parts=" << partition_count
+                      << " block=" << block_size
+                      << "\n");
+        std::ostringstream oss;
+        oss << "[part-decode] modes/k:";
         for (uint32_t i = 0; i < partition_count; ++i) {
-            std::cerr << " (" << static_cast<int>(part_modes[i]) << "," << part_k[i] << "," << part_sizes[i] << ")";
+            oss << " (" << static_cast<int>(part_modes[i]) << "," << part_k[i] << "," << part_sizes[i] << ")";
         }
-        std::cerr << " bits_before_parts=" << br.bits_remaining() << "\n";
+        oss << " bits_before_parts=" << br.bits_remaining() << "\n";
+        LAC_DEBUG_LOG(oss.str());
     }
 
     if (partition_order == 0 && part_modes[0] != control_mode) {
         if (debug_part) {
-            std::cerr << "[block-hdr] mode-mismatch control=" << static_cast<int>(control_mode)
-                      << " meta=" << static_cast<int>(part_modes[0]) << "\n";
+            LAC_DEBUG_LOG("[block-hdr] mode-mismatch control=" << static_cast<int>(control_mode)
+                          << " meta=" << static_cast<int>(part_modes[0]) << "\n");
         }
     }
 
@@ -367,30 +371,30 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
     for (uint32_t i = 0; i < partition_count; ++i) {
         size_t bits_before = br.bits_remaining();
         if (debug_part) {
-            std::cerr << "[part-entry] idx=" << i
-                      << " mode=" << static_cast<int>(part_modes[i])
-                      << " k=" << part_k[i]
-                      << " samples=" << part_sizes[i]
-                      << " bits_before=" << bits_before
-                      << "\n";
+            LAC_DEBUG_LOG("[part-entry] idx=" << i
+                          << " mode=" << static_cast<int>(part_modes[i])
+                          << " k=" << part_k[i]
+                          << " samples=" << part_sizes[i]
+                          << " bits_before=" << bits_before
+                          << "\n");
         }
         if (!decode_residual_segment(br, part_sizes[i], part_k[i], part_modes[i], residual, offset, stateless)) {
             if (debug_part) {
-                std::cerr << "[part-fail] idx=" << i
-                          << " consumed=" << (bits_before - br.bits_remaining())
-                          << " size=" << part_sizes[i]
-                          << " k=" << part_k[i]
-                          << " mode=" << static_cast<int>(part_modes[i])
-                          << " bits_left=" << br.bits_remaining()
-                          << "\n";
+                LAC_DEBUG_LOG("[part-fail] idx=" << i
+                              << " consumed=" << (bits_before - br.bits_remaining())
+                              << " size=" << part_sizes[i]
+                              << " k=" << part_k[i]
+                              << " mode=" << static_cast<int>(part_modes[i])
+                              << " bits_left=" << br.bits_remaining()
+                              << "\n");
             }
             return false;
         }
         if (debug_part) {
             size_t part_end_bit = br.bits_remaining();
-            std::cerr << "[part-ok] idx=" << i
-                      << " bits_consumed=" << (bits_before - part_end_bit)
-                      << " bits_left=" << part_end_bit << "\n";
+            LAC_DEBUG_LOG("[part-ok] idx=" << i
+                          << " bits_consumed=" << (bits_before - part_end_bit)
+                          << " bits_left=" << part_end_bit << "\n");
         }
         offset += part_sizes[i];
     }

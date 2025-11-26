@@ -4,8 +4,10 @@
 #include <thread>
 #include <cassert>
 #include <iostream>
+#include <sstream>
 #include "codec/lpc/lpc.hpp"
 #include "codec/rice/rice.hpp"
+#include "utils/logger.hpp"
 
 namespace LAC {
 namespace {
@@ -254,14 +256,14 @@ bool decode_residuals(BitSliceReader& reader,
     if (residual_mode > 2) return false;
 
     if (block_index >= 0 && e2e_debug_enabled()) {
-        std::cerr << "[res-enter] block=" << block_index
-                  << " samples=" << sample_count
-                  << " mode=" << static_cast<int>(residual_mode)
-                  << " k=" << initial_k
-                  << " stateless=" << (stateless ? 1 : 0)
-                  << " offset=" << write_offset
-                  << " bitpos=" << reader.bit_position()
-                  << "\n";
+        LAC_TRACE_LOG("[res-enter] block=" << block_index
+                      << " samples=" << sample_count
+                      << " mode=" << static_cast<int>(residual_mode)
+                      << " k=" << initial_k
+                      << " stateless=" << (stateless ? 1 : 0)
+                      << " offset=" << write_offset
+                      << " bitpos=" << reader.bit_position()
+                      << "\n");
     }
 
     if (residual_out) {
@@ -295,10 +297,10 @@ bool decode_residuals(BitSliceReader& reader,
         return !reader.has_error();
     } else if (residual_mode == 1) {
         if (block_index >= 0) {
-            std::cerr << "[zr-dec] block=" << block_index
-                      << " samples=" << sample_count
-                      << " k0=" << initial_k
-                      << "\n";
+            LAC_DEBUG_LOG("[zr-dec] block=" << block_index
+                          << " samples=" << sample_count
+                          << " k0=" << initial_k
+                          << "\n");
         }
         constexpr uint32_t kTagNormal = 0b00u;
         constexpr uint32_t kTagRun = 0b01u;
@@ -343,12 +345,12 @@ bool decode_residuals(BitSliceReader& reader,
                 }
                 if (block_index >= 0) {
                     const size_t abs_idx = write_offset + idx;
-                    std::cerr << "[zr-dec-token] block=" << block_index
-                              << " idx=" << abs_idx
-                              << " tag=normal"
-                              << " bitpos=" << tag_bit_pos
-                              << " val=" << rice_unsigned_to_signed(u)
-                              << "\n";
+                    LAC_DEBUG_LOG("[zr-dec-token] block=" << block_index
+                                  << " idx=" << abs_idx
+                                  << " tag=normal"
+                                  << " bitpos=" << tag_bit_pos
+                                  << " val=" << rice_unsigned_to_signed(u)
+                                  << "\n");
                 }
                 store(idx++, rice_unsigned_to_signed(u));
                 sum_u += u;
@@ -367,12 +369,12 @@ bool decode_residuals(BitSliceReader& reader,
                 assert(run_len >= 1);
                 if (block_index >= 0) {
                     const size_t abs_idx = write_offset + idx;
-                    std::cerr << "[zr-dec-token] block=" << block_index
-                              << " idx=" << abs_idx
-                              << " tag=run"
-                              << " bitpos=" << tag_bit_pos
-                              << " val=" << run_len
-                              << "\n";
+                    LAC_DEBUG_LOG("[zr-dec-token] block=" << block_index
+                                  << " idx=" << abs_idx
+                                  << " tag=run"
+                                  << " bitpos=" << tag_bit_pos
+                                  << " val=" << run_len
+                                  << "\n");
                 }
                 for (uint32_t j = 0; j < run_len; ++j) {
                     store(idx++, 0);
@@ -398,12 +400,12 @@ bool decode_residuals(BitSliceReader& reader,
                 int32_t value = zigzag_decode(zz);
                 if (block_index >= 0) {
                     const size_t abs_idx = write_offset + idx;
-                    std::cerr << "[zr-dec-token] block=" << block_index
-                              << " idx=" << abs_idx
-                              << " tag=escape"
-                              << " bitpos=" << tag_bit_pos
-                              << " val=" << value
-                              << "\n";
+                    LAC_DEBUG_LOG("[zr-dec-token] block=" << block_index
+                                  << " idx=" << abs_idx
+                                  << " tag=escape"
+                                  << " bitpos=" << tag_bit_pos
+                                  << " val=" << value
+                                  << "\n");
                 }
                 store(idx++, value);
                 uint32_t u = static_cast<uint32_t>((value << 1) ^ (value >> 31));
@@ -417,11 +419,11 @@ bool decode_residuals(BitSliceReader& reader,
             }
         }
         if (idx != sample_count && block_index >= 0) {
-            std::cerr << "[zr-dec-error] block=" << block_index
-                      << " reason=count-mismatch"
-                      << " decoded=" << idx
-                      << " expected=" << sample_count
-                      << "\n";
+        std::cerr << "[zr-dec-error] block=" << block_index
+                  << " reason=count-mismatch"
+                  << " decoded=" << idx
+                  << " expected=" << sample_count
+                  << "\n";
         }
         return idx == sample_count;
     } else if (residual_mode == 2) {
@@ -464,13 +466,13 @@ bool decode_residuals(BitSliceReader& reader,
                 ? adapt_k_stateless(sum_u, count)
                 : Rice::adapt_k(sum_u, count);
             if (block_index >= 0 && e2e_debug_enabled()) {
-                std::cerr << "[e2e-res] block=" << block_index
-                          << " idx=" << (write_offset + idx - 1)
-                          << " tag=" << (tag == kBinTagZero ? "bin0" : tag == kBinTagOne ? "bin1" : tag == kBinTagTwo ? "bin2" : "binfb")
-                          << " bitpos=" << tag_pos
-                          << " val=" << value
-                          << " k=" << current_k
-                          << "\n";
+                LAC_TRACE_LOG("[e2e-res] block=" << block_index
+                              << " idx=" << (write_offset + idx - 1)
+                              << " tag=" << (tag == kBinTagZero ? "bin0" : tag == kBinTagOne ? "bin1" : tag == kBinTagTwo ? "bin2" : "binfb")
+                              << " bitpos=" << tag_pos
+                              << " val=" << value
+                              << " k=" << current_k
+                              << "\n");
             }
         }
         return idx == sample_count;
@@ -485,7 +487,7 @@ bool scan_channel(BitSliceReader& reader,
                   int block_index,
                   int channel_id) {
     if (block_size == 0 || block_size > Block::MAX_BLOCK_SIZE) {
-        if (e2e_debug_enabled()) std::cerr << "[e2e] scan fail block=" << block_index << " reason=block_size\n";
+        if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan fail block=" << block_index << " reason=block_size\n"); }
         return false;
     }
 
@@ -498,73 +500,75 @@ bool scan_channel(BitSliceReader& reader,
     // Header layout per channel: predictor_type (8), predictor_order (8), LPC coeffs (if LPC),
     // residual_control (8), partition metadata ([mode:2|k:5] * partitions), residual bits, byte aligned.
     temp.predictor_type = static_cast<uint8_t>(local_reader.read_bits(8));
-    if (local_reader.has_error()) { if (e2e_debug_enabled()) std::cerr << "[e2e] scan fail block=" << block_index << " reason=predictor-byte\n"; return false; }
+    if (local_reader.has_error()) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan fail block=" << block_index << " reason=predictor-byte\n"); } return false; }
     if (temp.predictor_type > 2) {
-        if (e2e_debug_enabled()) std::cerr << "[e2e] scan fail block=" << block_index << " reason=predictor-type val=" << static_cast<int>(temp.predictor_type) << "\n";
+        if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan fail block=" << block_index << " reason=predictor-type val=" << static_cast<int>(temp.predictor_type) << "\n"); }
         return false;
     }
 
     temp.lpc_order = static_cast<int>(local_reader.read_bits(8));
-    if (local_reader.has_error()) { if (e2e_debug_enabled()) std::cerr << "[e2e] scan fail block=" << block_index << " reason=order-read\n"; return false; }
+    if (local_reader.has_error()) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan fail block=" << block_index << " reason=order-read\n"); } return false; }
     if (temp.predictor_type == kPredictorLpc) {
-        if (temp.lpc_order <= 0 || temp.lpc_order > 32 || static_cast<uint32_t>(temp.lpc_order) >= block_size) { if (e2e_debug_enabled()) std::cerr << "[e2e] scan fail block=" << block_index << " reason=lpc-order-invalid val=" << temp.lpc_order << "\n"; return false; }
+        if (temp.lpc_order <= 0 || temp.lpc_order > 32 || static_cast<uint32_t>(temp.lpc_order) >= block_size) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan fail block=" << block_index << " reason=lpc-order-invalid val=" << temp.lpc_order << "\n"); } return false; }
     } else {
-        if (temp.lpc_order < 0 || temp.lpc_order > 32) { if (e2e_debug_enabled()) std::cerr << "[e2e] scan fail block=" << block_index << " reason=fixed-order-invalid val=" << temp.lpc_order << "\n"; return false; }
+        if (temp.lpc_order < 0 || temp.lpc_order > 32) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan fail block=" << block_index << " reason=fixed-order-invalid val=" << temp.lpc_order << "\n"); } return false; }
     }
 
     if (temp.predictor_type == kPredictorLpc) {
         temp.coeffs.assign(static_cast<size_t>(temp.lpc_order) + 1, 0);
         for (int i = 1; i <= temp.lpc_order; ++i) {
             temp.coeffs[i] = static_cast<int16_t>(local_reader.read_bits(16));
-            if (local_reader.has_error()) { if (e2e_debug_enabled()) std::cerr << "[e2e] scan fail block=" << block_index << " reason=coeff-read\n"; return false; }
+            if (local_reader.has_error()) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan fail block=" << block_index << " reason=coeff-read\n"); } return false; }
         }
     } else {
         temp.coeffs.clear();
     }
 
     const uint8_t control = static_cast<uint8_t>(local_reader.read_bits(8));
-    if (local_reader.has_error()) { if (e2e_debug_enabled()) std::cerr << "[e2e] scan fail block=" << block_index << " reason=control-byte\n"; return false; }
+    if (local_reader.has_error()) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan fail block=" << block_index << " reason=control-byte\n"); } return false; }
     const bool partition_flag = (control & Block::PARTITION_FLAG) != 0u;
     const uint8_t control_mode = static_cast<uint8_t>((control >> 5) & 0x03u);
     temp.partition_order = partition_flag
         ? static_cast<uint8_t>((control & Block::PARTITION_ORDER_MASK) >> Block::PARTITION_ORDER_SHIFT)
         : 0;
-    if (partition_flag && temp.partition_order == 0) { if (e2e_debug_enabled()) std::cerr << "[e2e] scan fail block=" << block_index << " reason=partition-flag-zero\n"; return false; }
-    if (temp.partition_order > Block::MAX_PARTITION_ORDER) { if (e2e_debug_enabled()) std::cerr << "[e2e] scan fail block=" << block_index << " reason=partition-order\n"; return false; }
-    if ((temp.partition_order > 0) && ((block_size >> temp.partition_order) < Block::MIN_PARTITION_SIZE)) { if (e2e_debug_enabled()) std::cerr << "[e2e] scan fail block=" << block_index << " reason=partition-too-small\n"; return false; }
+    if (partition_flag && temp.partition_order == 0) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan fail block=" << block_index << " reason=partition-flag-zero\n"); } return false; }
+    if (temp.partition_order > Block::MAX_PARTITION_ORDER) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan fail block=" << block_index << " reason=partition-order\n"); } return false; }
+    if ((temp.partition_order > 0) && ((block_size >> temp.partition_order) < Block::MIN_PARTITION_SIZE)) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan fail block=" << block_index << " reason=partition-too-small\n"); } return false; }
 
     const uint32_t partition_count = (temp.partition_order == 0) ? 1u : (1u << temp.partition_order);
     const auto part_sizes = partition_sizes_for_block(block_size, temp.partition_order);
-    if (part_sizes.size() != partition_count || part_sizes.back() == 0) { if (e2e_debug_enabled()) std::cerr << "[e2e] scan fail block=" << block_index << " reason=partition-size\n"; return false; }
+    if (part_sizes.size() != partition_count || part_sizes.back() == 0) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan fail block=" << block_index << " reason=partition-size\n"); } return false; }
 
     std::vector<uint8_t> part_modes(partition_count);
     std::vector<uint32_t> part_k(partition_count);
     for (uint32_t i = 0; i < partition_count; ++i) {
         part_modes[i] = static_cast<uint8_t>(local_reader.read_bits(2));
         part_k[i] = local_reader.read_bits(5);
-        if (local_reader.has_error()) { if (e2e_debug_enabled()) std::cerr << "[e2e] scan fail block=" << block_index << " reason=partition-meta\n"; return false; }
-        if (part_modes[i] > 2) { if (e2e_debug_enabled()) std::cerr << "[e2e] scan fail block=" << block_index << " reason=mode-invalid\n"; return false; }
+        if (local_reader.has_error()) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan fail block=" << block_index << " reason=partition-meta\n"); } return false; }
+        if (part_modes[i] > 2) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan fail block=" << block_index << " reason=mode-invalid\n"); } return false; }
     }
 
     if (e2e_debug_enabled()) {
-        std::cerr << "[e2e-hdr] block=" << block_index
-                  << " ch=" << channel_id
-                  << " predict=" << static_cast<int>(temp.predictor_type)
-                  << " order=" << temp.lpc_order
-                  << " ctrl=" << static_cast<int>(control)
-                  << " mode=" << static_cast<int>(control_mode)
-                  << " pflag=" << (partition_flag ? 1 : 0)
-                  << " porder=" << static_cast<int>(temp.partition_order)
-                  << " pos=" << temp.start_bit
-                  << "\n";
-        std::cerr << "[e2e-meta] block=" << block_index
-                  << " ch=" << channel_id
-                  << " parts=" << partition_count
-                  << " bits_before_res=" << local_reader.bit_position();
+        LAC_TRACE_LOG("[e2e-hdr] block=" << block_index
+                      << " ch=" << channel_id
+                      << " predict=" << static_cast<int>(temp.predictor_type)
+                      << " order=" << temp.lpc_order
+                      << " ctrl=" << static_cast<int>(control)
+                      << " mode=" << static_cast<int>(control_mode)
+                      << " pflag=" << (partition_flag ? 1 : 0)
+                      << " porder=" << static_cast<int>(temp.partition_order)
+                      << " pos=" << temp.start_bit
+                      << "\n");
+        std::ostringstream oss;
+        oss << "[e2e-meta] block=" << block_index
+            << " ch=" << channel_id
+            << " parts=" << partition_count
+            << " bits_before_res=" << local_reader.bit_position();
         for (uint32_t i = 0; i < partition_count; ++i) {
-            std::cerr << " (" << static_cast<int>(part_modes[i]) << "," << part_k[i] << "," << part_sizes[i] << ")";
+            oss << " (" << static_cast<int>(part_modes[i]) << "," << part_k[i] << "," << part_sizes[i] << ")";
         }
-        std::cerr << "\n";
+        oss << "\n";
+        LAC_TRACE_LOG(oss.str());
     }
 
     const bool stateless = (temp.partition_order > 0);
@@ -577,32 +581,32 @@ bool scan_channel(BitSliceReader& reader,
         ps.residual_mode = temp.residual_mode;
         ps.initial_k = temp.initial_k;
         ps.start_bit = local_reader.bit_position();
-        if (!decode_residuals(local_reader, block_size, temp.initial_k, temp.residual_mode, nullptr, 0, stateless, block_index)) { if (e2e_debug_enabled()) std::cerr << "[e2e] scan fail block=" << block_index << " reason=decode-residuals\n"; return false; }
+        if (!decode_residuals(local_reader, block_size, temp.initial_k, temp.residual_mode, nullptr, 0, stateless, block_index)) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan fail block=" << block_index << " reason=decode-residuals\n"); } return false; }
         ps.bit_length = local_reader.bit_position() - ps.start_bit;
         temp.partitions.push_back(ps);
         temp.bit_length = (ps.start_bit + ps.bit_length) - temp.start_bit;
         local_reader.align_to_byte();
         if (local_reader.has_error()) return false;
         if (block_index >= 0 && e2e_debug_enabled()) {
-            std::cerr << "[scan-summary] block=" << block_index
-                      << " predict=" << static_cast<int>(temp.predictor_type)
-                      << " mode=" << static_cast<int>(temp.residual_mode)
-                      << " order=" << static_cast<int>(temp.partition_order)
-                      << " bitlen=" << temp.bit_length
-                      << " part0=" << ps.bit_length
-                      << " start=" << temp.start_bit
-                      << " size=" << temp.block_size
-                      << " ch=" << channel_id
-                      << "\n";
+            LAC_TRACE_LOG("[scan-summary] block=" << block_index
+                          << " predict=" << static_cast<int>(temp.predictor_type)
+                          << " mode=" << static_cast<int>(temp.residual_mode)
+                          << " order=" << static_cast<int>(temp.partition_order)
+                          << " bitlen=" << temp.bit_length
+                          << " part0=" << ps.bit_length
+                          << " start=" << temp.start_bit
+                          << " size=" << temp.block_size
+                          << " ch=" << channel_id
+                          << "\n");
         }
         slice = temp;
         reader.copy_from(local_reader);
         if (e2e_debug_enabled()) {
-            std::cerr << "[e2e-attempt-done] block=" << block_index
-                      << " ch=" << channel_id
-                      << " end=" << reader.bit_position()
-                      << " addr=" << &reader
-                      << "\n";
+            LAC_TRACE_LOG("[e2e-attempt-done] block=" << block_index
+                          << " ch=" << channel_id
+                          << " end=" << reader.bit_position()
+                          << " addr=" << &reader
+                          << "\n");
         }
         return true;
     }
@@ -614,7 +618,7 @@ bool scan_channel(BitSliceReader& reader,
         ps.residual_mode = part_modes[i];
         ps.initial_k = part_k[i];
         ps.start_bit = local_reader.bit_position();
-        if (!decode_residuals(local_reader, ps.sample_count, ps.initial_k, ps.residual_mode, nullptr, 0, stateless, block_index)) { if (e2e_debug_enabled()) std::cerr << "[e2e] scan fail block=" << block_index << " reason=decode-partial part=" << i << "\n"; return false; }
+        if (!decode_residuals(local_reader, ps.sample_count, ps.initial_k, ps.residual_mode, nullptr, 0, stateless, block_index)) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan fail block=" << block_index << " reason=decode-partial part=" << i << "\n"); } return false; }
         ps.bit_length = local_reader.bit_position() - ps.start_bit;
         temp.partitions.push_back(ps);
         sample_sum += ps.sample_count;
@@ -632,36 +636,36 @@ bool scan_channel(BitSliceReader& reader,
         if (e2e_debug_enabled()) {
             for (size_t idx = 0; idx < temp.partitions.size(); ++idx) {
                 const auto& ps = temp.partitions[idx];
-                std::cerr << "[e2e-part] block=" << block_index
-                          << " part=" << idx
-                          << " predict=" << static_cast<int>(temp.predictor_type)
-                          << " order=" << static_cast<int>(temp.partition_order)
-                          << " mode=" << static_cast<int>(ps.residual_mode)
-                          << " k=" << ps.initial_k
-                          << " start=" << ps.start_bit
-                          << " len=" << ps.bit_length
-                          << " samples=" << ps.sample_count
-                          << "\n";
+                LAC_TRACE_LOG("[e2e-part] block=" << block_index
+                              << " part=" << idx
+                              << " predict=" << static_cast<int>(temp.predictor_type)
+                              << " order=" << static_cast<int>(temp.partition_order)
+                              << " mode=" << static_cast<int>(ps.residual_mode)
+                              << " k=" << ps.initial_k
+                              << " start=" << ps.start_bit
+                              << " len=" << ps.bit_length
+                              << " samples=" << ps.sample_count
+                              << "\n");
             }
-            std::cerr << "[scan-summary] block=" << block_index
-                      << " predict=" << static_cast<int>(temp.predictor_type)
-                      << " mode=partitions"
-                      << " order=" << static_cast<int>(temp.partition_order)
-                      << " bitlen=" << temp.bit_length
-                      << " parts=" << temp.partitions.size()
-                      << " start=" << temp.start_bit
-                      << " ch=" << channel_id
-                      << "\n";
+            LAC_TRACE_LOG("[scan-summary] block=" << block_index
+                          << " predict=" << static_cast<int>(temp.predictor_type)
+                          << " mode=partitions"
+                          << " order=" << static_cast<int>(temp.partition_order)
+                          << " bitlen=" << temp.bit_length
+                          << " parts=" << temp.partitions.size()
+                          << " start=" << temp.start_bit
+                          << " ch=" << channel_id
+                          << "\n");
         }
     }
     slice = temp;
     reader.copy_from(local_reader);
     if (e2e_debug_enabled()) {
-        std::cerr << "[e2e-attempt-done] block=" << block_index
-                  << " ch=" << channel_id
-                  << " end=" << reader.bit_position()
-                  << " addr=" << &reader
-                  << "\n";
+        LAC_TRACE_LOG("[e2e-attempt-done] block=" << block_index
+                      << " ch=" << channel_id
+                      << " end=" << reader.bit_position()
+                      << " addr=" << &reader
+                      << "\n");
     }
     return true;
 }
@@ -747,7 +751,7 @@ bool Decoder::decode(const uint8_t* data,
     FrameHeader hdr;
     size_t header_bytes = 0;
     if (!FrameHeader::parse(data, size, hdr, header_bytes)) {
-        if (e2e_debug_enabled()) std::cerr << "[e2e] header parse failed\n";
+    if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] header parse failed\n"); }
         return false;
     }
 
@@ -756,16 +760,16 @@ bool Decoder::decode(const uint8_t* data,
     size_t payload_bytes = size - header_bytes;
     BitSliceReader reader(payload, 0, payload_bytes * 8);
 
-    if (reader.bits_remaining() < 32) { if (e2e_debug_enabled()) std::cerr << "[e2e] not enough bits for block_count\n"; return false; }
+    if (reader.bits_remaining() < 32) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] not enough bits for block_count\n"); } return false; }
     uint32_t block_count = reader.read_bits(32);
-    if (reader.has_error() || block_count == 0 || block_count > MAX_BLOCK_COUNT) { if (e2e_debug_enabled()) std::cerr << "[e2e] invalid block_count=" << block_count << "\n"; return false; }
-    if (reader.bits_remaining() < static_cast<uint64_t>(block_count) * 32ULL) { if (e2e_debug_enabled()) std::cerr << "[e2e] not enough bits for block sizes\n"; return false; }
+    if (reader.has_error() || block_count == 0 || block_count > MAX_BLOCK_COUNT) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] invalid block_count=" << block_count << "\n"); } return false; }
+    if (reader.bits_remaining() < static_cast<uint64_t>(block_count) * 32ULL) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] not enough bits for block sizes\n"); } return false; }
 
     std::vector<uint32_t> block_sizes(block_count);
     uint64_t total_samples = 0;
     for (uint32_t i = 0; i < block_count; ++i) {
         uint32_t sz = reader.read_bits(32);
-        if (reader.has_error() || sz == 0 || sz > Block::MAX_BLOCK_SIZE) { if (e2e_debug_enabled()) std::cerr << "[e2e] invalid block size index=" << i << " sz=" << sz << "\n"; return false; }
+        if (reader.has_error() || sz == 0 || sz > Block::MAX_BLOCK_SIZE) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] invalid block size index=" << i << " sz=" << sz << "\n"); } return false; }
         total_samples += sz;
         if (total_samples > MAX_TOTAL_SAMPLES) return false;
         block_sizes[i] = sz;
@@ -800,21 +804,21 @@ bool Decoder::decode(const uint8_t* data,
         } else {
             slices[i].mid_side = false;
         }
-        if (e2e_debug_enabled()) std::cerr << "[e2e] pre-scan block=" << i << " ch=0 pos=" << reader.bit_position() << " size=" << block_sizes[i] << " addr=" << &reader << "\n";
-        if (!scan_channel(reader, block_sizes[i], slices[i].primary, static_cast<int>(i), 0)) { if (e2e_debug_enabled()) std::cerr << "[e2e] scan primary fail block=" << i << "\n"; return false; }
+        if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] pre-scan block=" << i << " ch=0 pos=" << reader.bit_position() << " size=" << block_sizes[i] << " addr=" << &reader << "\n"); }
+        if (!scan_channel(reader, block_sizes[i], slices[i].primary, static_cast<int>(i), 0)) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan primary fail block=" << i << "\n"); } return false; }
         size_t primary_end = slices[i].primary.start_bit + slices[i].primary.bit_length;
         primary_end += (8u - (primary_end & 7u)) & 7u;
         reader.set_position(primary_end);
         if (isStereo) {
             slices[i].has_secondary = true;
-            if (e2e_debug_enabled()) std::cerr << "[e2e] pre-scan block=" << i << " ch=1 pos=" << reader.bit_position() << " size=" << block_sizes[i] << " addr=" << &reader << "\n";
-            if (!scan_channel(reader, block_sizes[i], slices[i].secondary, static_cast<int>(i), 1)) { if (e2e_debug_enabled()) std::cerr << "[e2e] scan secondary fail block=" << i << "\n"; return false; }
+            if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] pre-scan block=" << i << " ch=1 pos=" << reader.bit_position() << " size=" << block_sizes[i] << " addr=" << &reader << "\n"); }
+            if (!scan_channel(reader, block_sizes[i], slices[i].secondary, static_cast<int>(i), 1)) { if (e2e_debug_enabled()) { LAC_TRACE_LOG("[e2e] scan secondary fail block=" << i << "\n"); } return false; }
             size_t secondary_end = slices[i].secondary.start_bit + slices[i].secondary.bit_length;
             secondary_end += (8u - (secondary_end & 7u)) & 7u;
             reader.set_position(secondary_end);
         }
         if (e2e_debug_enabled()) {
-            std::cerr << "[e2e] post-block=" << i << " pos=" << reader.bit_position() << " addr=" << &reader << "\n";
+            LAC_TRACE_LOG("[e2e] post-block=" << i << " pos=" << reader.bit_position() << " addr=" << &reader << "\n");
         }
     }
 
@@ -822,23 +826,23 @@ bool Decoder::decode(const uint8_t* data,
     for (size_t i = 0; i < debug_blocks; ++i) {
         const auto& s = slices[i].primary;
         if (!s.partitions.empty()) {
-            std::cerr << "[slice] block=" << i
-                      << " start=" << s.start_bit
-                      << " len=" << s.bit_length
-                      << " parts=" << s.partitions.size()
-                      << " p0_start=" << s.partitions[0].start_bit
-                      << " p0_len=" << s.partitions[0].bit_length
-                      << "\n";
+            LAC_TRACE_LOG("[slice] block=" << i
+                          << " start=" << s.start_bit
+                          << " len=" << s.bit_length
+                          << " parts=" << s.partitions.size()
+                          << " p0_start=" << s.partitions[0].start_bit
+                          << " p0_len=" << s.partitions[0].bit_length
+                          << "\n");
         }
         if (slices[i].has_secondary && !slices[i].secondary.partitions.empty()) {
             const auto& sec = slices[i].secondary;
-            std::cerr << "[slice] block=" << i
-                      << " secondary start=" << sec.start_bit
-                      << " len=" << sec.bit_length
-                      << " parts=" << sec.partitions.size()
-                      << " p0_start=" << sec.partitions[0].start_bit
-                      << " p0_len=" << sec.partitions[0].bit_length
-                      << "\n";
+            LAC_TRACE_LOG("[slice] block=" << i
+                          << " secondary start=" << sec.start_bit
+                          << " len=" << sec.bit_length
+                          << " parts=" << sec.partitions.size()
+                          << " p0_start=" << sec.partitions[0].start_bit
+                          << " p0_len=" << sec.partitions[0].bit_length
+                          << "\n");
         }
     }
 
@@ -867,11 +871,11 @@ bool Decoder::decode(const uint8_t* data,
                 result.index = idx;
 
                 if (e2e_debug_enabled()) {
-                    std::cerr << "[e2e-block] block=" << idx
-                              << " predictA=" << static_cast<int>(slices[idx].primary.predictor_type)
-                              << " predictB=" << (slices[idx].has_secondary ? static_cast<int>(slices[idx].secondary.predictor_type) : -1)
-                              << " stereo=" << (perBlockStereo ? (slices[idx].mid_side ? "MS" : "LR") : (forceMidSide ? "MS" : "LR"))
-                              << "\n";
+                    LAC_TRACE_LOG("[e2e-block] block=" << idx
+                                  << " predictA=" << static_cast<int>(slices[idx].primary.predictor_type)
+                                  << " predictB=" << (slices[idx].has_secondary ? static_cast<int>(slices[idx].secondary.predictor_type) : -1)
+                                  << " stereo=" << (perBlockStereo ? (slices[idx].mid_side ? "MS" : "LR") : (forceMidSide ? "MS" : "LR"))
+                                  << "\n");
                 }
 
                 std::vector<int32_t> primary_pcm;

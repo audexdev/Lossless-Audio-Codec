@@ -4,9 +4,11 @@
 #include "codec/bitstream/bit_writer.hpp"
 #include "codec/simd/neon.hpp"
 #include "codec/simd/rice_neon.hpp"
+#include "utils/logger.hpp"
 #include <algorithm>
 #include <limits>
 #include <iostream>
+#include <sstream>
 
 namespace Block {
 
@@ -575,13 +577,13 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
         base_mode = 2;
     }
     if (this->debug_zr && this->zero_run_enabled) {
-        std::cerr << "[zr-est] block=" << this->block_index
-                  << " normal=" << base_bits_normal
-                  << " zr=" << base_bits_zr
-                  << " bin=" << base_bits_bin
-                  << " chosen=" << static_cast<int>(base_mode)
-                  << " has_run=" << has_run
-                  << "\n";
+        LAC_DEBUG_LOG("[zr-est] block=" << this->block_index
+                      << " normal=" << base_bits_normal
+                      << " zr=" << base_bits_zr
+                      << " bin=" << base_bits_bin
+                      << " chosen=" << static_cast<int>(base_mode)
+                      << " has_run=" << has_run
+                      << "\n");
     }
 
     PartitionChoice legacy_choice{
@@ -639,11 +641,11 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
             uint64_t total = bits_sum + meta;
             total += (8u - (total & 7u)) & 7u;
             if (this->debug_partitions) {
-                std::cerr << "[part-est] block=" << this->block_index
-                          << " p=" << static_cast<uint32_t>(p)
-                          << " bits=" << total
-                          << " partitions=" << choices.size()
-                          << "\n";
+                LAC_DEBUG_LOG("[part-est] block=" << this->block_index
+                              << " p=" << static_cast<uint32_t>(p)
+                              << " bits=" << total
+                              << " partitions=" << choices.size()
+                              << "\n");
             }
             if (total < best_total_bits ||
                 (total == best_total_bits && p < best_partition_order)) {
@@ -653,10 +655,10 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
             }
         }
         if (this->debug_partitions) {
-            std::cerr << "[part-choose] block=" << this->block_index
-                      << " best_p=" << static_cast<uint32_t>(best_partition_order)
-                      << " bits=" << best_total_bits
-                      << "\n";
+            LAC_DEBUG_LOG("[part-choose] block=" << this->block_index
+                          << " best_p=" << static_cast<uint32_t>(best_partition_order)
+                          << " bits=" << best_total_bits
+                          << "\n");
         }
     }
 
@@ -665,16 +667,17 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
     const bool use_stateless_adapt = (best_partition_order > 0);
 
     if (this->debug_partitions && best_partition_order > 0) {
-        std::cerr << "[part-plan] block=" << this->block_index
-                  << " order=" << static_cast<uint32_t>(best_partition_order)
-                  << " parts=" << best_partitions.size();
+        std::ostringstream oss;
+        oss << "[part-plan] block=" << this->block_index
+            << " order=" << static_cast<uint32_t>(best_partition_order)
+            << " parts=" << best_partitions.size();
         size_t dbg_offset = 0;
         for (size_t i = 0; i < best_partitions.size(); ++i) {
             const auto& p = best_partitions[i];
-            std::cerr << " [" << i << " mode=" << static_cast<int>(p.residual_mode)
-                      << " k=" << p.initial_k
-                      << " len=" << p.length
-                      << " bits=" << p.bits << "]";
+            oss << " [" << i << " mode=" << static_cast<int>(p.residual_mode)
+                << " k=" << p.initial_k
+                << " len=" << p.length
+                << " bits=" << p.bits << "]";
             size_t zero_count = 0;
             int32_t max_abs = 0;
             for (size_t j = 0; j < p.length && dbg_offset + j < best.residual.size(); ++j) {
@@ -683,10 +686,11 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
                 int32_t abs_v = (v >= 0) ? v : -v;
                 if (abs_v > max_abs) max_abs = abs_v;
             }
-            std::cerr << " zc=" << zero_count << " max=" << max_abs;
+            oss << " zc=" << zero_count << " max=" << max_abs;
             dbg_offset += p.length;
         }
-        std::cerr << "\n";
+        oss << "\n";
+        LAC_DEBUG_LOG(oss.str());
     }
 
     auto encode_rice_partition = [&](size_t start, size_t length, uint32_t initial_k_value) {
@@ -717,40 +721,40 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
             if (v == 0) {
                 bw.write_bits(kBinTagZero, 2);
                 if (this->debug_partitions && token_idx < 12) {
-                    std::cerr << "[part-enc] p=" << part_index
-                              << " tok=" << token_idx
-                              << " tag=bin0"
-                              << " k=" << current_k << "\n";
+                    LAC_DEBUG_LOG("[part-enc] p=" << part_index
+                                  << " tok=" << token_idx
+                                  << " tag=bin0"
+                                  << " k=" << current_k << "\n");
                 }
             } else if (v == 1 || v == -1) {
                 bw.write_bits(kBinTagOne, 2);
                 bw.write_bit(v < 0 ? 1u : 0u);
                 if (this->debug_partitions && token_idx < 12) {
-                    std::cerr << "[part-enc] p=" << part_index
-                              << " tok=" << token_idx
-                              << " tag=bin1"
-                              << " sign=" << (v < 0 ? "-" : "+")
-                              << " k=" << current_k << "\n";
+                    LAC_DEBUG_LOG("[part-enc] p=" << part_index
+                                  << " tok=" << token_idx
+                                  << " tag=bin1"
+                                  << " sign=" << (v < 0 ? "-" : "+")
+                                  << " k=" << current_k << "\n");
                 }
             } else if (v == 2 || v == -2) {
                 bw.write_bits(kBinTagTwo, 2);
                 bw.write_bit(v < 0 ? 1u : 0u);
                 if (this->debug_partitions && token_idx < 12) {
-                    std::cerr << "[part-enc] p=" << part_index
-                              << " tok=" << token_idx
-                              << " tag=bin2"
-                              << " sign=" << (v < 0 ? "-" : "+")
-                              << " k=" << current_k << "\n";
+                    LAC_DEBUG_LOG("[part-enc] p=" << part_index
+                                  << " tok=" << token_idx
+                                  << " tag=bin2"
+                                  << " sign=" << (v < 0 ? "-" : "+")
+                                  << " k=" << current_k << "\n");
                 }
             } else {
                 bw.write_bits(kBinTagFallback, 2);
                 rice.encode(bw, v, current_k);
                 if (this->debug_partitions && token_idx < 12) {
-                    std::cerr << "[part-enc] p=" << part_index
-                              << " tok=" << token_idx
-                              << " tag=bin-fb"
-                              << " k=" << current_k
-                              << " u=" << u << "\n";
+                    LAC_DEBUG_LOG("[part-enc] p=" << part_index
+                                  << " tok=" << token_idx
+                                  << " tag=bin-fb"
+                                  << " k=" << current_k
+                                  << " u=" << u << "\n");
                 }
             }
             sum_u += u;
@@ -781,17 +785,17 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
             }
             if (run >= kZeroRunMinRun) {
             if (this->debug_zr) {
-                std::cerr << "[zr-enc-token] block=" << this->block_index
-                          << " idx=" << idx
-                          << " tag=run"
-                          << " val=" << run
-                          << "\n";
+                LAC_DEBUG_LOG("[zr-enc-token] block=" << this->block_index
+                              << " idx=" << idx
+                              << " tag=run"
+                              << " val=" << run
+                              << "\n");
             }
                 if (this->debug_partitions && token_idx < 12) {
-                    std::cerr << "[part-enc] p=" << part_index
-                              << " tok=" << token_idx
-                              << " tag=run len=" << run
-                              << " k=" << current_k << "\n";
+                    LAC_DEBUG_LOG("[part-enc] p=" << part_index
+                                  << " tok=" << token_idx
+                                  << " tag=run len=" << run
+                                  << " k=" << current_k << "\n");
                 }
                 bw.write_bits(kTagRun, 2);
                 write_rice_unsigned(bw, static_cast<uint32_t>(run - kZeroRunMinRun), kZeroRunRunK);
@@ -810,18 +814,18 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
             const uint32_t escape_threshold = 1u << std::min<uint32_t>(24, current_k + 3u);
             if (u > escape_threshold) {
             if (this->debug_zr) {
-                std::cerr << "[zr-enc-token] block=" << this->block_index
-                          << " idx=" << idx
-                          << " tag=escape"
-                          << " val=" << best.residual[idx]
-                          << "\n";
+                LAC_DEBUG_LOG("[zr-enc-token] block=" << this->block_index
+                              << " idx=" << idx
+                              << " tag=escape"
+                              << " val=" << best.residual[idx]
+                              << "\n");
             }
                 if (this->debug_partitions && token_idx < 12) {
-                    std::cerr << "[part-enc] p=" << part_index
-                              << " tok=" << token_idx
-                              << " tag=esc"
-                              << " k=" << current_k
-                              << " u=" << u << "\n";
+                    LAC_DEBUG_LOG("[part-enc] p=" << part_index
+                                  << " tok=" << token_idx
+                                  << " tag=esc"
+                                  << " k=" << current_k
+                                  << " u=" << u << "\n");
                 }
                 bw.write_bits(kTagEscape, 2);
                 bw.write_bits(zigzag_encode(best.residual[idx]), 32);
@@ -838,17 +842,17 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
             // Normal token encodes exactly one residual.
             bw.write_bits(kTagNormal, 2);
             if (this->debug_partitions && token_idx < 12) {
-                std::cerr << "[part-enc] p=" << part_index
-                          << " tok=" << token_idx
-                          << " tag=norm n=1"
-                          << " k=" << current_k << "\n";
+                LAC_DEBUG_LOG("[part-enc] p=" << part_index
+                              << " tok=" << token_idx
+                              << " tag=norm n=1"
+                              << " k=" << current_k << "\n");
             }
             if (this->debug_zr) {
-                std::cerr << "[zr-enc-token] block=" << this->block_index
-                          << " idx=" << idx
-                          << " tag=normal"
-                          << " val=" << best.residual[idx]
-                          << "\n";
+                LAC_DEBUG_LOG("[zr-enc-token] block=" << this->block_index
+                              << " idx=" << idx
+                              << " tag=normal"
+                              << " val=" << best.residual[idx]
+                              << "\n");
             }
             rice.encode(bw, best.residual[idx], current_k);
             sum_u += u;
@@ -889,11 +893,13 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
     size_t part_idx = 0;
     for (const auto& part : best_partitions) {
         if (this->debug_partitions && best_partition_order > 0) {
-            std::cerr << "[part-samples] idx=" << part_idx << " first=";
+            std::ostringstream oss;
+            oss << "[part-samples] idx=" << part_idx << " first=";
             for (size_t j = 0; j < std::min<size_t>(8, part.length) && offset + j < best.residual.size(); ++j) {
-                std::cerr << best.residual[offset + j] << (j + 1 < std::min<size_t>(8, part.length) ? "," : "");
+                oss << best.residual[offset + j] << (j + 1 < std::min<size_t>(8, part.length) ? "," : "");
             }
-            std::cerr << "\n";
+            oss << "\n";
+            LAC_DEBUG_LOG(oss.str());
         }
         if (part.residual_mode == 0) {
             encode_rice_partition(offset, part.length, part.initial_k);
@@ -909,16 +915,16 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
     bw.flush_to_byte();
 
     if (this->debug_lpc) {
-        std::cerr << "[debug-lpc] block=" << pcm.size()
-                  << " energy=" << static_cast<double>(best.energy)
-                  << " chosen_order=" << chosen_order
-                  << " predictor=" << static_cast<int>(best.predictor_type)
-                  << " est_bits=" << best.best_bits
-                  << " rice_bits=" << best.rice_bits
-                  << " zr_bits=" << best.zr_bits
-                  << " bin_bits=" << best.bin_bits
-                  << " part_order=" << static_cast<uint32_t>(best_partition_order)
-                  << "\n";
+        LAC_DEBUG_LOG("[debug-lpc] block=" << pcm.size()
+                      << " energy=" << static_cast<double>(best.energy)
+                      << " chosen_order=" << chosen_order
+                      << " predictor=" << static_cast<int>(best.predictor_type)
+                      << " est_bits=" << best.best_bits
+                      << " rice_bits=" << best.rice_bits
+                      << " zr_bits=" << best.zr_bits
+                      << " bin_bits=" << best.bin_bits
+                      << " part_order=" << static_cast<uint32_t>(best_partition_order)
+                      << "\n");
     }
 
     return bw.get_buffer();
