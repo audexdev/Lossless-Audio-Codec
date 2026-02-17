@@ -411,19 +411,19 @@ namespace LAC {
 
     int64_t absdiff_sum = 0;
     int64_t sum = 0;
-    __int128 sumsq = 0;
+    long double sumsq = 0.0L;
 
     const size_t end = position + length;
     const int32_t first = channel[position];
     sum = static_cast<int64_t>(first);
-    sumsq = static_cast<__int128>(first) * static_cast<__int128>(first);
+    sumsq = static_cast<long double>(first) * static_cast<long double>(first);
 
     if constexpr (SIMD::kHasNeon) {
       absdiff_sum = SIMD::neon_absdiff_sum(channel.data() + position, length);
       for (size_t i = position + 1; i < end; ++i) {
         const int64_t v = static_cast<int64_t>(channel[i]);
         sum += v;
-        sumsq += static_cast<__int128>(v) * static_cast<__int128>(v);
+        sumsq += static_cast<long double>(v) * static_cast<long double>(v);
       }
     } else {
       int32_t prev = first;
@@ -431,7 +431,7 @@ namespace LAC {
         const int32_t cur = channel[i];
         const int64_t v = static_cast<int64_t>(cur);
         sum += v;
-        sumsq += static_cast<__int128>(v) * static_cast<__int128>(v);
+        sumsq += static_cast<long double>(v) * static_cast<long double>(v);
         const int64_t diff = static_cast<int64_t>(cur) - static_cast<int64_t>(prev);
         absdiff_sum += (diff >= 0 ? diff : -diff);
         prev = cur;
@@ -441,7 +441,7 @@ namespace LAC {
     const double absdiff_avg = static_cast<double>(absdiff_sum) / static_cast<double>(length);
     const double mean = static_cast<double>(sum) / static_cast<double>(length);
     const double mean_sq = mean * mean;
-    const double avg_sq = static_cast<double>(sumsq) / static_cast<double>(length);
+    const double avg_sq = static_cast<double>(sumsq / static_cast<long double>(length));
     double variance = avg_sq - mean_sq;
     if (variance < 0.0) variance = 0.0;
 
