@@ -12,6 +12,7 @@ void run_zerorun_tests();
 void run_partitioning_tests();
 void run_predictor_tests();
 void run_e2e_tests();
+void run_decoder_error_tests();
 
 namespace {
 
@@ -145,7 +146,7 @@ void run_case(const std::string& name, const std::vector<int32_t>& block) {
 
     for (const auto& eval : evals) {
         assert(eval.order >= 4 && eval.order <= 12);
-        assert(eval.residual_energy >= 0);
+        assert(eval.bits > 0);
         if (raw_energy > 0) {
             assert(eval.residual_energy <= raw_energy);
         }
@@ -171,6 +172,7 @@ int main() {
     run_zerorun_tests();
     run_partitioning_tests();
     run_predictor_tests();
+    run_decoder_error_tests();
     run_e2e_tests();
     return 0;
 }

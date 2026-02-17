@@ -126,6 +126,41 @@ void run_case(const std::string& filename) {
 
 } // namespace
 
+
+void run_decoder_error_tests() {
+    LAC::Decoder decoder;
+    std::vector<int32_t> out_left, out_right;
+    FrameHeader hdr;
+
+    auto expect_throw = [&](const char* label, const uint8_t* data, size_t size) {
+        bool threw = false;
+        try {
+            decoder.decode(data, size, out_left, out_right, &hdr);
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        if (!threw) {
+            std::cerr << "[decoder-error-test] expected throw: " << label << "\n";
+            assert(false);
+        }
+    };
+
+    std::vector<uint8_t> empty;
+    expect_throw("empty-data", empty.data(), empty.size());
+
+    std::vector<uint8_t> invalid_header(10, 0);
+    expect_throw("invalid-header", invalid_header.data(), invalid_header.size());
+
+    BitWriter bw;
+    FrameHeader valid_header;
+    valid_header.write(bw);
+    bw.flush_to_byte();
+    std::vector<uint8_t> header_only = bw.get_buffer();
+    expect_throw("header-only", header_only.data(), header_only.size());
+
+    std::cout << "decoder error tests ok\n";
+}
+
 void run_e2e_tests() {
     const char* files[] = {
         "16.44100.wav",

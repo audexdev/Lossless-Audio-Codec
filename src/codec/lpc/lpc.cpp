@@ -3,6 +3,16 @@
 #include <cmath>
 #include <limits>
 
+namespace {
+inline int32_t clamp_to_int32(int64_t value) {
+    const int64_t lo = static_cast<int64_t>(std::numeric_limits<int32_t>::min());
+    const int64_t hi = static_cast<int64_t>(std::numeric_limits<int32_t>::max());
+    if (value < lo) return std::numeric_limits<int32_t>::min();
+    if (value > hi) return std::numeric_limits<int32_t>::max();
+    return static_cast<int32_t>(value);
+}
+} // namespace
+
 LPC::LPC(int order)
     : order(order)
 {
@@ -141,8 +151,9 @@ void LPC::compute_residual_q15(const std::vector<int32_t>& block,
                        static_cast<int64_t>(recon[n - i]);
             }
         }
-        int32_t pred = static_cast<int32_t>(acc >> 15);
-        residual[n] = block[n] - pred;
+        const int64_t pred = (acc >> 15);
+        const int64_t sample = static_cast<int64_t>(block[n]) - pred;
+        residual[n] = clamp_to_int32(sample);
         recon[n] = block[n];
     }
 }
@@ -161,7 +172,8 @@ void LPC::restore_from_residual_q15(const std::vector<int32_t>& residual,
                        static_cast<int64_t>(out_block[n - i]);
             }
         }
-        int32_t pred = static_cast<int32_t>(acc >> 15);
-        out_block[n] = pred + residual[n];
+        const int64_t pred = (acc >> 15);
+        const int64_t sample = pred + static_cast<int64_t>(residual[n]);
+        out_block[n] = clamp_to_int32(sample);
     }
 }

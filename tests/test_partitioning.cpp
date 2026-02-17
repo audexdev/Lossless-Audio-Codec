@@ -9,6 +9,7 @@
 #include <cassert>
 #include <cstdint>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -122,9 +123,32 @@ void verify_block_roundtrip(const std::vector<int32_t>& pcm,
     assert(decoded == pcm);
 }
 
+void expect_fir_order_throw(uint8_t fir_order) {
+    std::vector<uint8_t> buf = {1u, fir_order}; // predictor_type=FIR, order=fir_order
+    BitReader br(buf);
+    Block::Decoder dec;
+    std::vector<int32_t> decoded;
+    bool threw = false;
+    try {
+        (void)dec.decode(br, 64, decoded);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    if (!threw) {
+        std::cerr << "expected runtime_error for FIR order=" << static_cast<int>(fir_order) << "\n";
+        assert(false);
+    }
+}
+
 } // namespace
 
 void run_partitioning_tests() {
+    {
+        expect_fir_order_throw(0);
+        expect_fir_order_throw(1);
+        std::cout << "fir order validation tests ok\n";
+    }
+
     {
         // Manual buffers for all supported partition orders.
         for (uint8_t order = 0; order <= Block::MAX_PARTITION_ORDER; ++order) {
