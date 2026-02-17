@@ -5,6 +5,7 @@
 #include "codec/rice/rice.hpp"
 #include "utils/logger.hpp"
 #include <sstream>
+#include <stdexcept>
 
 namespace Block {
 
@@ -77,13 +78,14 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
         uint64_t sumU = 0;
         uint32_t count = 0;
         auto to_unsigned = [](int32_t v) -> uint32_t {
-            return static_cast<uint32_t>((v << 1) ^ (v >> 31));
+            return (static_cast<uint32_t>(v) << 1) ^ (static_cast<uint32_t>(v >> 31));
         };
 
         if (residual_mode == 0) {
             for (uint32_t i = 0; i < samples; ++i) {
                 residual[offset + i] = rice.decode(reader, current_k);
-                uint32_t u = static_cast<uint32_t>((residual[offset + i] << 1) ^ (residual[offset + i] >> 31));
+                uint32_t u = (static_cast<uint32_t>(residual[offset + i]) << 1)
+                    ^ (static_cast<uint32_t>(residual[offset + i] >> 31));
                 sumU += u;
                 ++count;
                 current_k = adapt_k(sumU, count, stateless);
@@ -106,17 +108,23 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
                     }
                     return false;
                 }
-                uint32_t tag = kTagEscape;
-                if (tag_prefix == 0) {
-                    tag = reader.read_bit();
-                } else {
-                    (void)reader.read_bit(); // consume escape tag padding bit
-                }
+                uint32_t tag_suffix = reader.read_bit();
                 if (reader.has_error()) {
                     if (debug) {
                         LAC_DEBUG_LOG("[part-dec] read error before tag idx=" << idx << "\n");
                     }
                     return false;
+                }
+                uint32_t tag = 0xFFu;
+                if (tag_prefix == 0u) {
+                    tag = (tag_suffix == 0u) ? kTagNormal : kTagRun; // 00 / 01
+                } else if (tag_suffix == 0u) {
+                    tag = kTagEscape; // 10
+                } else {
+                    if (debug) {
+                        LAC_DEBUG_LOG("[part-dec] invalid tag=3 idx=" << idx << "\n");
+                    }
+                    return false; // 11 is reserved/invalid
                 }
                 if (debug) {
                     LAC_DEBUG_LOG("[part-dec] tag=" << tag << " idx=" << idx << " k=" << current_k << "\n");
@@ -185,7 +193,8 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
                                       << " v=" << value
                                       << " k=" << current_k << "\n");
                     }
-                    uint32_t u = static_cast<uint32_t>((value << 1) ^ (value >> 31));
+                    uint32_t u = (static_cast<uint32_t>(value) << 1)
+                        ^ (static_cast<uint32_t>(value >> 31));
                     sumU += u;
                     ++count;
                     current_k = adapt_k(sumU, count, stateless);
@@ -301,6 +310,10 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
     if (predictor_type > 2) return false;
     if (predictor_type == 2) {
         if (order <= 0 || order > 32 || static_cast<uint32_t>(order) >= block_size) return false;
+    } else if (predictor_type == 1) {
+        if (order < 2 || order > 32) {
+            throw std::runtime_error("[block-decode] invalid FIR predictor order");
+        }
     } else {
         if (order < 0 || order > 32) return false;
     }

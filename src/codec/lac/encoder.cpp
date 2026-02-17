@@ -38,7 +38,7 @@ namespace {
     if (residual.empty()) return 0;
     uint64_t sum_u = 0;
     for (int32_t r : residual) {
-      sum_u += static_cast<uint32_t>((r << 1) ^ (r >> 31));
+      sum_u += (static_cast<uint32_t>(r) << 1) ^ (static_cast<uint32_t>(r >> 31));
     }
     const uint64_t mean = (sum_u + (residual.size() >> 1)) / residual.size();
     uint32_t k = 0;
@@ -46,7 +46,7 @@ namespace {
 
     uint64_t bits = 0;
     for (int32_t r : residual) {
-      const uint32_t u = static_cast<uint32_t>((r << 1) ^ (r >> 31));
+      const uint32_t u = (static_cast<uint32_t>(r) << 1) ^ (static_cast<uint32_t>(r >> 31));
       const uint32_t q = (k >= 31u) ? 0u : (u >> k);
       bits += static_cast<uint64_t>(q) + 1u + k;
     }

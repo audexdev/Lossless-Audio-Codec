@@ -7,6 +7,7 @@
 #include <fstream>
 #include <filesystem>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -86,8 +87,12 @@ void run_case(const std::string& filename) {
     LAC::Decoder decoder;
     std::vector<int32_t> dec_left, dec_right;
     FrameHeader hdr;
-    ok = decoder.decode(bitstream.data(), bitstream.size(), dec_left, dec_right, &hdr);
-    assert(ok && "Decode failed");
+    try {
+        decoder.decode(bitstream.data(), bitstream.size(), dec_left, dec_right, &hdr);
+    } catch (const std::runtime_error& e) {
+        std::cerr << "[e2e-decode-error] file=" << filename << " error=" << e.what() << "\n";
+        assert(false && "Decode failed");
+    }
 
     const auto out_wav_path = write_temp_path(".wav");
     ok = write_wav(out_wav_path.string(), dec_left, dec_right, hdr.channels, hdr.sample_rate, hdr.bit_depth);

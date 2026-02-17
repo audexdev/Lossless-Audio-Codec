@@ -164,7 +164,8 @@ int main(int argc, char** argv) {
       LAC::Decoder decoder(decoderCollectorPtr);
       std::vector<int32_t> left, right;
       FrameHeader hdr;
-      if (!decoder.decode(bitstream.data(), bitstream.size(), left, right, &hdr) || left.empty()) {
+      decoder.decode(bitstream.data(), bitstream.size(), left, right, &hdr);
+      if (left.empty()) {
         std::cerr << "Decode failed or produced no samples\n";
         return 1;
       }
@@ -216,10 +217,7 @@ int main(int argc, char** argv) {
         std::vector<int32_t> dec_lr_left, dec_lr_right;
         FrameHeader hdr_lr;
         auto t0 = std::chrono::high_resolution_clock::now();
-        if (!decoder.decode(bs_lr.data(), bs_lr.size(), dec_lr_left, dec_lr_right, &hdr_lr)) {
-          std::cerr << "LR decode failed for sr=" << sample_rate << " depth=" << int(bit_depth) << "\n";
-          return false;
-        }
+        decoder.decode(bs_lr.data(), bs_lr.size(), dec_lr_left, dec_lr_right, &hdr_lr);
         auto t1 = std::chrono::high_resolution_clock::now();
         if (dec_lr_left != src_left || dec_lr_right != src_right) {
           std::cerr << "LR roundtrip mismatch for sr=" << sample_rate << " depth=" << int(bit_depth) << "\n";
@@ -234,10 +232,7 @@ int main(int argc, char** argv) {
         std::vector<int32_t> dec_ms_left, dec_ms_right;
         FrameHeader hdr_ms;
         auto t2 = std::chrono::high_resolution_clock::now();
-        if (!decoder.decode(bs_ms.data(), bs_ms.size(), dec_ms_left, dec_ms_right, &hdr_ms)) {
-          std::cerr << "MS decode failed for sr=" << sample_rate << " depth=" << int(bit_depth) << "\n";
-          return false;
-        }
+        decoder.decode(bs_ms.data(), bs_ms.size(), dec_ms_left, dec_ms_right, &hdr_ms);
         auto t3 = std::chrono::high_resolution_clock::now();
         if (dec_ms_left != src_left || dec_ms_right != src_right) {
           std::cerr << "MS roundtrip mismatch for sr=" << sample_rate << " depth=" << int(bit_depth) << "\n";

@@ -11,7 +11,7 @@ class Decoder {
 public:
     explicit Decoder(ThreadCollector* collector = nullptr);
 
-    bool decode(const uint8_t* data,
+    void decode(const uint8_t* data,
                 size_t size,
                 std::vector<int32_t>& left,
                 std::vector<int32_t>& right,

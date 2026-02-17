@@ -51,7 +51,7 @@ constexpr int kFirShift = 2;
 constexpr int kFirTaps[] = {3, -1};
 
 inline uint32_t unsigned_from_residual(int32_t r) {
-    return static_cast<uint32_t>((r << 1) ^ (r >> 31));
+    return (static_cast<uint32_t>(r) << 1) ^ (static_cast<uint32_t>(r >> 31));
 }
 
 inline uint64_t rice_bits_for_unsigned(uint32_t u, uint32_t k) {
@@ -82,7 +82,7 @@ inline void write_rice_unsigned(BitWriter& bw, uint32_t value, uint32_t k) {
 }
 
 inline uint32_t zigzag_encode(int32_t v) {
-    return static_cast<uint32_t>((static_cast<uint32_t>(v) << 1) ^ static_cast<uint32_t>(v >> 31));
+    return (static_cast<uint32_t>(v) << 1) ^ (static_cast<uint32_t>(v >> 31));
 }
 
 inline uint8_t max_partition_order_for_block(uint32_t block_size) {

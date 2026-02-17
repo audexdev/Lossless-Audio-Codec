@@ -10,6 +10,7 @@
 #include <cassert>
 #include <cstdint>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -172,7 +173,7 @@ void roundtrip_block(const std::vector<int32_t>& pcm, bool enable_zr) {
                         first_escape_val = zigzag_decode(zz);
                     }
                     residual[idx++] = zigzag_decode(zz);
-                    uint32_t u = static_cast<uint32_t>((residual[idx - 1] << 1) ^ (residual[idx - 1] >> 31));
+                    uint32_t u = (static_cast<uint32_t>(residual[idx - 1]) << 1) ^ (static_cast<uint32_t>(residual[idx - 1] >> 31));
                     sum_u += u;
                     current_k = Rice::adapt_k(sum_u, idx);
                 } else {
@@ -321,7 +322,12 @@ void roundtrip_lac(const std::vector<int32_t>& left,
     LAC::Decoder dec;
     std::vector<int32_t> outL, outR;
     FrameHeader hdr;
-    assert(dec.decode(bs.data(), bs.size(), outL, outR, &hdr));
+    try {
+        dec.decode(bs.data(), bs.size(), outL, outR, &hdr);
+    } catch (const std::runtime_error& e) {
+        std::cerr << "[zerorun-lac-decode-error] " << e.what() << "\n";
+        assert(false && "LAC decode failed");
+    }
     assert(outL == left);
     assert(outR == right);
 }

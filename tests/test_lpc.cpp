@@ -18,7 +18,7 @@ namespace {
 constexpr int kCandidates[] = {4, 6, 8, 10, 12};
 
 inline uint32_t unsigned_from_residual(int32_t r) {
-    return static_cast<uint32_t>((r << 1) ^ (r >> 31));
+    return (static_cast<uint32_t>(r) << 1) ^ (static_cast<uint32_t>(r >> 31));
 }
 
 uint64_t estimate_rice_bits(const std::vector<int32_t>& residual) {
