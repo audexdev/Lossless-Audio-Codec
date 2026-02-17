@@ -104,15 +104,12 @@ void neon_ms_encode(const int32_t* L, const int32_t* R,
 
     size_t i = 0;
     const size_t limit = n & ~static_cast<size_t>(3);
-    const int32x4_t ones = vdupq_n_s32(1);
 
     for (; i < limit; i += 4) {
         int32x4_t l = vld1q_s32(L + i);
         int32x4_t r = vld1q_s32(R + i);
         int32x4_t sum = vaddq_s32(l, r);
-        int32x4_t odd = vandq_s32(sum, ones);
-        sum = vsubq_s32(sum, odd);
-        int32x4_t mid = vrshrq_n_s32(sum, 1);
+        int32x4_t mid = vshrq_n_s32(sum, 1);
         int32x4_t side = vsubq_s32(l, r);
         vst1q_s32(M + i, mid);
         vst1q_s32(S + i, side);
