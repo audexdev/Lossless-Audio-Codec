@@ -2,8 +2,6 @@
 #include "codec/lpc/lpc.hpp"
 #include "codec/rice/rice.hpp"
 #include "codec/bitstream/bit_writer.hpp"
-#include "codec/simd/neon.hpp"
-#include "codec/simd/rice_neon.hpp"
 #include "utils/logger.hpp"
 #include <algorithm>
 #include <limits>

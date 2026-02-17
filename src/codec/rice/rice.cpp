@@ -1,9 +1,10 @@
 #include "rice.hpp"
 #include <algorithm>
 #include <array>
+#include <cstdint>
 
 uint32_t Rice::signed_to_unsigned(int32_t v) {
-    return (uint32_t)((v << 1) ^ (v >> 31));
+  return (static_cast<uint32_t>(v) << 1) ^ (static_cast<uint32_t>(v >> 31));
 }
 
 int32_t Rice::unsigned_to_signed(uint32_t u) {
