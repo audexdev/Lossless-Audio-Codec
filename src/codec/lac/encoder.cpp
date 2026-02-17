@@ -7,6 +7,7 @@
 #include <iostream>
 #include "codec/simd/neon.hpp"
 #include "codec/lpc/lpc.hpp"
+#include "utils/logger.hpp"
 
 namespace {
   constexpr double kAbsDiffWeight = 1.0;
@@ -304,10 +305,11 @@ namespace LAC {
               StereoCost cost = estimate_stereo_cost(left, right, start, block.size, this->order);
               bool choose_ms = cost.choose_ms();
               if (this->debug_stereo_est) {
-                std::cerr << "[stereo-est] block=" << block_idx
+                LAC_DEBUG_LOG("[stereo-est] block=" << block_idx
                   << " lr_bits=" << (cost.lr_valid ? cost.lr_bits : kMaxCostProxy)
                   << " ms_bits=" << (cost.ms_valid ? cost.ms_bits : kMaxCostProxy)
                   << " chosen=" << (choose_ms ? "MS" : "LR") << "\n";
+                );
               }
               mode_used = (choose_ms ? "MS" : "LR");
               encodedBytes.push_back(choose_ms ? 1 : 0);
@@ -321,9 +323,10 @@ namespace LAC {
             }
 
             if (this->debug_stereo_est && isStereo) {
-              std::cerr << "[stereo-mode] global=" << int(globalStereoMode)
+              LAC_DEBUG_LOG("[stereo-mode] global=" << int(globalStereoMode)
                 << " block=" << block_idx
                 << " mode_used=" << mode_used << "\n";
+              );
             }
 
             return encodedBytes;

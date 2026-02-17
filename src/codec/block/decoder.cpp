@@ -1,5 +1,4 @@
 #include "decoder.hpp"
-#include <cstdlib>
 #include <iostream>
 #include "codec/bitstream/bit_reader.hpp"
 #include "codec/lpc/lpc.hpp"
@@ -13,8 +12,8 @@ Decoder::Decoder() {}
 
 bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& out) {
     if (block_size == 0 || block_size > MAX_BLOCK_SIZE) return false;
-    const bool debug_zr = (std::getenv("LAC_DEBUG_ZR") != nullptr);
-    const bool debug_part = (std::getenv("LAC_DEBUG_PART") != nullptr);
+    const bool debug_zr = LAC_DEBUG_ZR_ENABLED();
+    const bool debug_part = LAC_DEBUG_PART_ENABLED();
     constexpr uint32_t kBinTagZero = 0b00u;
     constexpr uint32_t kBinTagOne = 0b01u;
     constexpr uint32_t kBinTagTwo = 0b10u;

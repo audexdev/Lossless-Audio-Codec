@@ -1,6 +1,7 @@
 #include "decoder.hpp"
 #include <algorithm>
-#include <iostream>
+#include <stdexcept>
+#include <string>
 #include <thread>
 #include "codec/block/decoder.hpp"
 #include "codec/bitstream/bit_reader.hpp"
@@ -11,6 +12,11 @@ namespace {
 
 constexpr uint32_t MAX_BLOCK_COUNT = 10'000'000;
 constexpr uint64_t MAX_TOTAL_SAMPLES = 6'912'000'000ULL; // 10 hours @ 192 kHz
+
+[[noreturn]] void throw_decode_error(uint32_t block_index, const char* channel) {
+  throw std::runtime_error(
+      std::string("[decode-error] block=") + std::to_string(block_index) + " channel=" + channel);
+}
 
 void reconstruct_mid_side(std::vector<int32_t>& mid,
                           std::vector<int32_t>& side,
@@ -102,19 +108,13 @@ bool Decoder::decode(const uint8_t* data,
     Block::Decoder blockDec;
     std::vector<int32_t> primary_pcm;
     if (!blockDec.decode(br, block_sizes[i], primary_pcm)) {
-      std::cerr << "[decode-error] block=" << i << " channel=primary\n";
-      left.clear();
-      right.clear();
-      return false;
+      throw_decode_error(i, "primary");
     }
 
     std::vector<int32_t> secondary_pcm;
     if (isStereo) {
       if (!blockDec.decode(br, block_sizes[i], secondary_pcm)) {
-        std::cerr << "[decode-error] block=" << i << " channel=secondary\n";
-        left.clear();
-        right.clear();
-        return false;
+        throw_decode_error(i, "secondary");
       }
     }
 
