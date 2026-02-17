@@ -1,7 +1,6 @@
 #pragma once
 #include <array>
 #include <cstdint>
-#include <cstring>
 #include <vector>
 #include "codec/bitstream/bit_writer.hpp"
 #include "codec/bitstream/bit_reader.hpp"

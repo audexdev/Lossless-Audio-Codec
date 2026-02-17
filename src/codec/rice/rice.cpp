@@ -74,12 +74,12 @@ uint32_t Rice::adapt_k(uint64_t sum, uint32_t count, AdaptState& state) {
     state.previous_sum = sum;
 
     // Track micro-window flags first so we can evict the slot we will overwrite.
-    const uint32_t micro_idx = (count - 1) % Rice::kMicroWindow;
+    const uint32_t micro_idx = (count - 1) % kMicroWindow;
     state.large_q_count -= state.large_flags[micro_idx];
     state.zero_q_count -= state.zero_flags[micro_idx];
 
     // Update drift window.
-    if (state.window_filled < Rice::kDriftWindow) {
+    if (state.window_filled < kDriftWindow) {
         state.window_filled++;
     } else {
         state.window_sum -= state.recent_u[state.window_index];
@@ -117,8 +117,8 @@ uint32_t Rice::adapt_k(uint64_t sum, uint32_t count, AdaptState& state) {
     }
 
     // Micro adaptation on quotient distribution.
-    if (state.window_index + 1 >= Rice::kMicroWindow || state.window_filled >= Rice::kMicroWindow) {
-        const uint32_t window_size = std::min<uint32_t>(state.window_filled, Rice::kMicroWindow);
+    if (state.window_index + 1 >= kMicroWindow || state.window_filled >= kMicroWindow) {
+        const uint32_t window_size = std::min<uint32_t>(state.window_filled, kMicroWindow);
         if (state.large_q_count * 4 >= window_size * 3) { // many large quotients
             bias = std::min<int32_t>(bias + 1, 1);
         } else if (state.zero_q_count * 5 >= window_size * 4) { // mostly zeros
@@ -130,6 +130,6 @@ uint32_t Rice::adapt_k(uint64_t sum, uint32_t count, AdaptState& state) {
     if (biased_k < 0) biased_k = 0;
     if (biased_k > 31) biased_k = 31;
 
-    state.window_index = (state.window_index + 1) % Rice::kDriftWindow;
+    state.window_index = (state.window_index + 1) % kDriftWindow;
     return static_cast<uint32_t>(biased_k);
 }

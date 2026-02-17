@@ -4,6 +4,7 @@
 #include "codec/lpc/lpc.hpp"
 #include "codec/rice/rice.hpp"
 #include "utils/logger.hpp"
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -34,8 +35,8 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
         return static_cast<int32_t>((u >> 1) ^ -static_cast<int32_t>(u & 1u));
     };
 
-    auto adapt_k = [](uint64_t sum, uint32_t count, bool stateless, Rice::AdaptState& state) -> uint32_t {
-        if (!stateless) return Rice::adapt_k(sum, count, state);
+    auto adapt_k = [](uint64_t sum, uint32_t count, bool stateless, Rice::AdaptState* state) -> uint32_t {
+        if (!stateless) return Rice::adapt_k(sum, count, *state);
         if (count == 0) return 0;
         const uint64_t mean = (sum + (count >> 1)) / count;
         uint32_t k = 0;
@@ -77,7 +78,9 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
         uint32_t current_k = initial_k;
         uint64_t sumU = 0;
         uint32_t count = 0;
-        Rice::AdaptState adapt_state;
+        std::optional<Rice::AdaptState> adapt_state_opt;
+        if (!stateless) adapt_state_opt.emplace();
+        Rice::AdaptState* adapt_state = adapt_state_opt ? &*adapt_state_opt : nullptr;
         auto to_unsigned = [](int32_t v) -> uint32_t {
             return (static_cast<uint32_t>(v) << 1) ^ (static_cast<uint32_t>(v >> 31));
         };
