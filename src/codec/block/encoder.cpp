@@ -392,7 +392,10 @@ bool Encoder::estimate_bits(const std::vector<int32_t>& pcm,
 
         eval.residual.resize(pcm.size());
         if (!pcm.empty()) {
-            lpc.compute_residual_q15(pcm, eval.coeffs_q15, eval.residual);
+            lpc.compute_residual_q15(pcm, eval.coeffs_q15, eval.residual, &eval.used_order);
+        }
+        if (eval.used_order == 0) {
+            continue;
         }
 
         uint32_t adaptive_k = estimate_initial_k(eval.residual);
@@ -424,7 +427,10 @@ bool Encoder::estimate_bits(const std::vector<int32_t>& pcm,
         lpc_fallback.analyze_block_q15(pcm, coeffs_q15, used_order, &energy);
         std::vector<int32_t> residual(pcm.size());
         if (!pcm.empty()) {
-            lpc_fallback.compute_residual_q15(pcm, coeffs_q15, residual);
+            lpc_fallback.compute_residual_q15(pcm, coeffs_q15, residual, &used_order);
+        }
+        if (used_order == 0) {
+            return false;
         }
         best.target_order = fallback_order;
         best.used_order = used_order;
@@ -521,7 +527,10 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
 
         ev.residual.resize(pcm.size());
         if (!pcm.empty()) {
-            lpc.compute_residual_q15(pcm, ev.coeffs_q15, ev.residual);
+            lpc.compute_residual_q15(pcm, ev.coeffs_q15, ev.residual, &ev.used_order);
+        }
+        if (ev.used_order == 0) {
+            continue;
         }
         uint32_t k0 = estimate_initial_k(ev.residual);
         ev.rice_bits = estimate_adaptive_rice_bits(ev.residual, k0);
@@ -554,7 +563,7 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
     }
 
     const int chosen_order = (best.predictor_type == kPredictorLpc)
-        ? std::max(1, std::min(best.order_param, max_valid_order))
+        ? std::max(1, std::min(best.used_order, max_valid_order))
         : best.order_param;
 
     struct PartitionChoice {

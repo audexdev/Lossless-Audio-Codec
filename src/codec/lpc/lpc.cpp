@@ -11,6 +11,62 @@ inline int32_t clamp_to_int32(int64_t value) {
     if (value > hi) return std::numeric_limits<int32_t>::max();
     return static_cast<int32_t>(value);
 }
+
+constexpr int kResidualFallbackOrders[] = {12, 10, 8, 6, 4};
+
+inline int detect_used_order_from_coeffs(const std::vector<int16_t>& coeffs_q15,
+                                         int max_order) {
+    const int upper = std::min(max_order, static_cast<int>(coeffs_q15.size()) - 1);
+    for (int i = upper; i >= 1; --i) {
+        if (coeffs_q15[i] != 0) return i;
+    }
+    return 0;
+}
+
+inline void append_unique_order(std::vector<int>& out, int order) {
+    if (std::find(out.begin(), out.end(), order) == out.end()) {
+        out.push_back(order);
+    }
+}
+
+inline void build_residual_attempt_orders(int start_order,
+                                          int max_order,
+                                          std::vector<int>& attempts) {
+    attempts.clear();
+    start_order = std::max(0, std::min(start_order, max_order));
+    append_unique_order(attempts, start_order);
+    for (int cand : kResidualFallbackOrders) {
+        if (cand < start_order && cand <= max_order) {
+            append_unique_order(attempts, cand);
+        }
+    }
+    append_unique_order(attempts, 0);
+}
+
+inline bool compute_open_loop_residual_for_order(const std::vector<int32_t>& block,
+                                                 const std::vector<int16_t>& coeffs_q15,
+                                                 int order,
+                                                 std::vector<int32_t>& residual) {
+    const int64_t lo = static_cast<int64_t>(std::numeric_limits<int32_t>::min());
+    const int64_t hi = static_cast<int64_t>(std::numeric_limits<int32_t>::max());
+    const size_t n_samples = block.size();
+
+    for (size_t n = 0; n < n_samples; ++n) {
+        int64_t acc = 0;
+        const int taps = std::min(order, static_cast<int>(n));
+        for (int i = 1; i <= taps; ++i) {
+            acc += static_cast<int64_t>(coeffs_q15[i]) *
+                   static_cast<int64_t>(block[n - static_cast<size_t>(i)]);
+        }
+        const int64_t pred = (acc >> 15);
+        const int64_t diff = static_cast<int64_t>(block[n]) - pred;
+        if (diff < lo || diff > hi) {
+            return false;
+        }
+        residual[n] = static_cast<int32_t>(diff);
+    }
+    return true;
+}
 } // namespace
 
 LPC::LPC(int order)
@@ -82,7 +138,13 @@ int LPC::levinson_durbin(const std::vector<long double>& R,
         if (ki < -0.999L) ki = -0.999L;
 
         K[i] = ki;
-        a[i] = ki;
+        const long double e_new = (1.0L - K[i] * K[i]) * E[i - 1];
+        if (!std::isfinite(e_new) || e_new < eps) {
+            achieved_order = i - 1;
+            break;
+        }
+
+        a[i] = K[i];
 
         for (int j = 1; j < i; ++j) {
             a[j] = prevA[j] - K[i] * prevA[i - j];
@@ -92,11 +154,7 @@ int LPC::levinson_durbin(const std::vector<long double>& R,
             prevA[j] = a[j];
         }
 
-        E[i] = (1.0L - K[i] * K[i]) * E[i - 1];
-        if (!std::isfinite(E[i]) || E[i] < eps) {
-            achieved_order = i - 1;
-            break;
-        }
+        E[i] = e_new;
         achieved_order = i;
     }
 
@@ -137,24 +195,44 @@ bool LPC::analyze_block_q15(const std::vector<int32_t>& block,
 
 void LPC::compute_residual_q15(const std::vector<int32_t>& block,
                                const std::vector<int16_t>& coeffs_q15,
-                               std::vector<int32_t>& residual) const {
-    size_t N = block.size();
-    residual.resize(N);
+                               std::vector<int32_t>& residual,
+                               int* used_order_inout) const {
+    const size_t n_samples = block.size();
+    residual.resize(n_samples);
 
-    std::vector<int32_t> recon(N);
+    const int max_coeff_order = std::max(0,
+        std::min(this->order, static_cast<int>(coeffs_q15.size()) - 1));
+    int start_order = detect_used_order_from_coeffs(coeffs_q15, max_coeff_order);
+    if (used_order_inout != nullptr) {
+        start_order = std::max(0, std::min(*used_order_inout, max_coeff_order));
+    }
 
-    for (size_t n = 0; n < N; ++n) {
-        int64_t acc = 0;
-        for (int i = 1; i <= this->order; ++i) {
-            if (n >= static_cast<size_t>(i)) {
-                acc += static_cast<int64_t>(coeffs_q15[i]) *
-                       static_cast<int64_t>(recon[n - i]);
-            }
+    std::vector<int> attempts;
+    build_residual_attempt_orders(start_order, max_coeff_order, attempts);
+
+    int final_order = 0;
+    bool found = false;
+    for (int candidate_order : attempts) {
+        if (candidate_order <= 0) {
+            std::copy(block.begin(), block.end(), residual.begin());
+            final_order = 0;
+            found = true;
+            break;
         }
-        const int64_t pred = (acc >> 15);
-        const int64_t sample = static_cast<int64_t>(block[n]) - pred;
-        residual[n] = clamp_to_int32(sample);
-        recon[n] = block[n];
+        if (compute_open_loop_residual_for_order(block, coeffs_q15, candidate_order, residual)) {
+            final_order = candidate_order;
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        std::copy(block.begin(), block.end(), residual.begin());
+        final_order = 0;
+    }
+
+    if (used_order_inout != nullptr) {
+        *used_order_inout = final_order;
     }
 }
 

@@ -25,12 +25,14 @@ void neon_lpc_residual(const int32_t* pcm,
                        const int16_t* coeffs_q15,
                        int32_t* residual,
                        size_t n,
-                       int order);
+                       int order,
+                       int* used_order_inout = nullptr);
 
 void lpc_residual_simd_or_scalar(const int32_t* pcm,
                                  const int16_t* coeffs_q15,
                                  int32_t* residual,
                                  size_t n,
-                                 int order);
+                                 int order,
+                                 int* used_order_inout = nullptr);
 
 } // namespace SIMD
