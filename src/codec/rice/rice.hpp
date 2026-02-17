@@ -1,11 +1,34 @@
 #pragma once
+#include <array>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 #include "codec/bitstream/bit_writer.hpp"
 #include "codec/bitstream/bit_reader.hpp"
 
 class Rice {
 public:
+    static constexpr uint32_t kDriftWindow = 256;
+    static constexpr uint32_t kMicroWindow = 96;
+
+    struct AdaptState {
+        uint64_t previous_sum = 0;
+        uint32_t window_index = 0;
+        uint32_t window_filled = 0;
+        uint64_t window_sum = 0;
+        uint16_t large_q_count = 0;
+        uint16_t zero_q_count = 0;
+        std::array<uint32_t, kDriftWindow> recent_u;
+        std::array<uint8_t, kMicroWindow> large_flags;
+        std::array<uint8_t, kMicroWindow> zero_flags;
+
+        AdaptState() {
+            recent_u.fill(0);
+            large_flags.fill(0);
+            zero_flags.fill(0);
+        }
+    };
+
     static void encode(BitWriter& w, int32_t value, uint32_t k);
 
     static int32_t decode(BitReader& r, uint32_t k);
@@ -13,7 +36,7 @@ public:
     // Compute optimal k from residual block
     static uint32_t compute_k(const std::vector<int32_t>& residuals);
 
-    static uint32_t adapt_k(uint64_t sum, uint32_t count);
+    static uint32_t adapt_k(uint64_t sum, uint32_t count, AdaptState& state);
 
 private:
     static uint32_t signed_to_unsigned(int32_t v);

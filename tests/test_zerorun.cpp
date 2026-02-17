@@ -128,6 +128,7 @@ void roundtrip_block(const std::vector<int32_t>& pcm, bool enable_zr) {
             uint32_t idx = 0;
             uint32_t current_k = static_cast<uint32_t>(k0);
             uint64_t sum_u = 0;
+            Rice::AdaptState adapt_state;
             bool would_fail = false;
             uint32_t norm_tokens = 0, run_tokens = 0, esc_tokens = 0;
             int32_t first_norm_val = 0;
@@ -146,7 +147,7 @@ void roundtrip_block(const std::vector<int32_t>& pcm, bool enable_zr) {
                         first_norm_val = residual[idx - 1];
                     }
                     sum_u += u;
-                    current_k = Rice::adapt_k(sum_u, idx);
+                    current_k = Rice::adapt_k(sum_u, idx, adapt_state);
                 } else if (tag == 1) {
                     uint32_t run = read_rice_unsigned(Block::ZERO_RUN_LENGTH_K) + Block::ZERO_RUN_MIN_LENGTH;
                     if (idx + run > residual.size()) {
@@ -156,7 +157,7 @@ void roundtrip_block(const std::vector<int32_t>& pcm, bool enable_zr) {
                     ++run_tokens;
                     for (uint32_t j = 0; j < run && idx < residual.size(); ++j) {
                         residual[idx++] = 0;
-                        current_k = Rice::adapt_k(sum_u, idx);
+                        current_k = Rice::adapt_k(sum_u, idx, adapt_state);
                     }
                 } else if (tag == 2) {
                     if (idx >= residual.size()) {
@@ -175,7 +176,7 @@ void roundtrip_block(const std::vector<int32_t>& pcm, bool enable_zr) {
                     residual[idx++] = zigzag_decode(zz);
                     uint32_t u = (static_cast<uint32_t>(residual[idx - 1]) << 1) ^ (static_cast<uint32_t>(residual[idx - 1] >> 31));
                     sum_u += u;
-                    current_k = Rice::adapt_k(sum_u, idx);
+                    current_k = Rice::adapt_k(sum_u, idx, adapt_state);
                 } else {
                     would_fail = true;
                     break;

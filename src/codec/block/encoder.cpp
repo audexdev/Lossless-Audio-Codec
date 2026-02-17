@@ -193,13 +193,14 @@ uint64_t estimate_adaptive_rice_bits(const std::vector<int32_t>& residual,
     uint64_t bits = 0;
     uint32_t current_k = initial_k;
     uint64_t sum_u = 0;
+    Rice::AdaptState adapt_state;
     for (size_t i = 0; i < residual.size(); ++i) {
         const uint32_t u = unsigned_from_residual(residual[i]);
         bits += rice_bits_for_unsigned(u, current_k);
         sum_u += u;
         current_k = stateless
             ? adapt_k_stateless(sum_u, static_cast<uint32_t>(i + 1))
-            : Rice::adapt_k(sum_u, static_cast<uint32_t>(i + 1));
+            : Rice::adapt_k(sum_u, static_cast<uint32_t>(i + 1), adapt_state);
     }
     return bits;
 }
@@ -212,6 +213,7 @@ uint64_t estimate_zerorun_bits(const std::vector<int32_t>& residual,
     uint32_t current_k = initial_k;
     uint64_t sum_u = 0;
     uint32_t count = 0;
+    Rice::AdaptState adapt_state;
 
     size_t idx = 0;
     while (idx < residual.size()) {
@@ -226,7 +228,7 @@ uint64_t estimate_zerorun_bits(const std::vector<int32_t>& residual,
                 ++count;
                 current_k = stateless
                     ? adapt_k_stateless(sum_u, count)
-                    : Rice::adapt_k(sum_u, count);
+                    : Rice::adapt_k(sum_u, count, adapt_state);
             }
             idx += run;
             continue;
@@ -241,7 +243,7 @@ uint64_t estimate_zerorun_bits(const std::vector<int32_t>& residual,
             ++count;
             current_k = stateless
                 ? adapt_k_stateless(sum_u, count)
-                : Rice::adapt_k(sum_u, count);
+                : Rice::adapt_k(sum_u, count, adapt_state);
             ++idx;
             continue;
         }
@@ -253,7 +255,7 @@ uint64_t estimate_zerorun_bits(const std::vector<int32_t>& residual,
         ++count;
         current_k = stateless
             ? adapt_k_stateless(sum_u, count)
-            : Rice::adapt_k(sum_u, count);
+            : Rice::adapt_k(sum_u, count, adapt_state);
         ++idx;
     }
     return bits;
@@ -267,6 +269,7 @@ uint64_t estimate_binning_bits(const std::vector<int32_t>& residual,
     uint32_t current_k = initial_k;
     uint64_t sum_u = 0;
     uint32_t count = 0;
+    Rice::AdaptState adapt_state;
 
     for (int32_t v : residual) {
         const uint32_t u = unsigned_from_residual(v);
@@ -284,7 +287,7 @@ uint64_t estimate_binning_bits(const std::vector<int32_t>& residual,
         ++count;
         current_k = stateless
             ? adapt_k_stateless(sum_u, count)
-            : Rice::adapt_k(sum_u, count);
+            : Rice::adapt_k(sum_u, count, adapt_state);
     }
     return bits;
 }
@@ -694,6 +697,7 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
     auto encode_rice_partition = [&](size_t start, size_t length, uint32_t initial_k_value) {
         uint32_t current_k = initial_k_value;
         uint64_t sum_u = 0;
+        Rice::AdaptState adapt_state;
         for (size_t i = 0; i < length; ++i) {
             const size_t pos = start + i;
             const int32_t v = best.residual[pos];
@@ -702,7 +706,7 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
             sum_u += u;
             current_k = use_stateless_adapt
                 ? adapt_k_stateless(sum_u, static_cast<uint32_t>(i + 1))
-                : Rice::adapt_k(sum_u, static_cast<uint32_t>(i + 1));
+                : Rice::adapt_k(sum_u, static_cast<uint32_t>(i + 1), adapt_state);
         }
     };
 
@@ -711,6 +715,7 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
         uint64_t sum_u = 0;
         uint32_t count = 0;
         size_t token_idx = 0;
+        Rice::AdaptState adapt_state;
 
         for (size_t i = 0; i < length; ++i) {
             const size_t pos = start + i;
@@ -759,7 +764,7 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
             ++count;
             current_k = use_stateless_adapt
                 ? adapt_k_stateless(sum_u, count)
-                : Rice::adapt_k(sum_u, count);
+                : Rice::adapt_k(sum_u, count, adapt_state);
             ++token_idx;
         }
     };
@@ -773,6 +778,7 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
         uint64_t sum_u = 0;
         uint32_t count = 0;
         size_t token_idx = 0;
+        Rice::AdaptState adapt_state;
 
         size_t idx = start;
         const size_t end = start + length;
@@ -801,7 +807,7 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
                     ++count;
                     current_k = use_stateless_adapt
                         ? adapt_k_stateless(sum_u, count)
-                        : Rice::adapt_k(sum_u, count);
+                        : Rice::adapt_k(sum_u, count, adapt_state);
                 }
                 idx += run;
                 ++token_idx;
@@ -831,7 +837,7 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
                 ++count;
                 current_k = use_stateless_adapt
                     ? adapt_k_stateless(sum_u, count)
-                    : Rice::adapt_k(sum_u, count);
+                    : Rice::adapt_k(sum_u, count, adapt_state);
                 ++idx;
                 ++token_idx;
                 continue;
@@ -857,7 +863,7 @@ std::vector<uint8_t> Encoder::encode(const std::vector<int32_t>& pcm) {
             ++count;
             current_k = use_stateless_adapt
                 ? adapt_k_stateless(sum_u, count)
-                : Rice::adapt_k(sum_u, count);
+                : Rice::adapt_k(sum_u, count, adapt_state);
             ++idx;
             ++token_idx;
         }

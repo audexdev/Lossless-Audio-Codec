@@ -34,8 +34,8 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
         return static_cast<int32_t>((u >> 1) ^ -static_cast<int32_t>(u & 1u));
     };
 
-    auto adapt_k = [](uint64_t sum, uint32_t count, bool stateless) -> uint32_t {
-        if (!stateless) return Rice::adapt_k(sum, count);
+    auto adapt_k = [](uint64_t sum, uint32_t count, bool stateless, Rice::AdaptState& state) -> uint32_t {
+        if (!stateless) return Rice::adapt_k(sum, count, state);
         if (count == 0) return 0;
         const uint64_t mean = (sum + (count >> 1)) / count;
         uint32_t k = 0;
@@ -77,6 +77,7 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
         uint32_t current_k = initial_k;
         uint64_t sumU = 0;
         uint32_t count = 0;
+        Rice::AdaptState adapt_state;
         auto to_unsigned = [](int32_t v) -> uint32_t {
             return (static_cast<uint32_t>(v) << 1) ^ (static_cast<uint32_t>(v >> 31));
         };
@@ -88,7 +89,7 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
                     ^ (static_cast<uint32_t>(residual[offset + i] >> 31));
                 sumU += u;
                 ++count;
-                current_k = adapt_k(sumU, count, stateless);
+                current_k = adapt_k(sumU, count, stateless, adapt_state);
                 if (reader.has_error()) return false;
             }
             return true;
@@ -145,7 +146,7 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
                     }
                     sumU += u;
                     ++count;
-                    current_k = adapt_k(sumU, count, stateless);
+                    current_k = adapt_k(sumU, count, stateless, adapt_state);
                     if (debug_zr) {
                         LAC_DEBUG_LOG("[zr-decode] normal idx=" << (offset + idx - 1) << " err=" << reader.has_error() << "\n");
                     }
@@ -166,7 +167,7 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
                                           << " v=0 k=" << current_k << "\n");
                         }
                         ++count;
-                        current_k = adapt_k(sumU, count, stateless);
+                        current_k = adapt_k(sumU, count, stateless, adapt_state);
                     }
                     if (debug_zr) {
                         LAC_DEBUG_LOG("[zr-decode] run len=" << run_len << " idx=" << idx << " err=" << reader.has_error() << "\n");
@@ -197,7 +198,7 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
                         ^ (static_cast<uint32_t>(value >> 31));
                     sumU += u;
                     ++count;
-                    current_k = adapt_k(sumU, count, stateless);
+                    current_k = adapt_k(sumU, count, stateless, adapt_state);
                     if (debug_zr) {
                         LAC_DEBUG_LOG("[zr-decode] escape idx=" << idx << " val=" << value << " err=" << reader.has_error() << "\n");
                     }
@@ -238,7 +239,7 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
                     value = zigzag_decode(u);
                     sumU += u;
                     ++count;
-                    current_k = adapt_k(sumU, count, stateless);
+                    current_k = adapt_k(sumU, count, stateless, adapt_state);
                     residual[offset + idx++] = value;
                     continue;
                 } else {
@@ -248,7 +249,7 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
                 residual[offset + idx++] = value;
                 sumU += u;
                 ++count;
-                current_k = adapt_k(sumU, count, stateless);
+                current_k = adapt_k(sumU, count, stateless, adapt_state);
             }
             return idx == samples;
         }
