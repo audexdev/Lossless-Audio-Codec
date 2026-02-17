@@ -17,7 +17,6 @@ add_library(lac STATIC
     src/codec/lpc/lpc.cpp
     src/codec/rice/rice.cpp
     src/codec/simd/neon.cpp
-    src/codec/simd/rice_neon.cpp
     src/io/wav_io.cpp
     src/utils/logger.cpp
 
@@ -33,8 +32,6 @@ add_library(lac STATIC
     src/codec/lpc/lpc.hpp
     src/codec/rice/rice.hpp
     src/codec/simd/neon.hpp
-    src/codec/simd/rice_neon.hpp
-    src/io/byte_stream.hpp
     src/io/wav_io.hpp
     src/utils/endian.hpp
     src/utils/logger.hpp
