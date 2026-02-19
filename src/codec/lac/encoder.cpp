@@ -21,6 +21,38 @@ namespace {
     uint32_t size;
   };
 
+  bool has_zero_run_samples(const std::vector<int32_t>& samples) {
+    if (samples.empty()) return false;
+    size_t idx = 0;
+    while (idx < samples.size()) {
+      if (samples[idx] == 0) {
+        size_t run = 0;
+        while (idx + run < samples.size() && samples[idx + run] == 0) {
+          ++run;
+        }
+        if (run >= Block::ZERO_RUN_MIN_LENGTH) return true;
+        idx += run;
+      } else {
+        ++idx;
+      }
+    }
+    return false;
+  }
+
+  bool should_enable_zero_run_for_block(const std::vector<int32_t>& pcm, int order) {
+    if (pcm.empty()) return false;
+    if (!has_zero_run_samples(pcm)) return false;
+    Block::Encoder estimator(order, false, false);
+    estimator.set_zero_run_enabled(true);
+    uint64_t bits_normal = 0;
+    uint64_t bits_zr = 0;
+    uint64_t bits_bin = 0;
+    if (!estimator.estimate_bits(pcm, bits_normal, bits_zr, bits_bin)) {
+      return false;
+    }
+    return bits_zr < std::min(bits_normal, bits_bin);
+  }
+
   double block_slope_penalty(const std::vector<int32_t>& channel, size_t position, size_t length) {
     if (channel.empty() || length <= 1 || position + length > channel.size()) return 0.0;
     const int64_t first = channel[position];
@@ -70,19 +102,20 @@ namespace {
 
   bool estimate_channel_cost(const std::vector<int32_t>& pcm,
       int order,
+      bool zero_run_enabled,
+      bool partitioning_enabled,
       uint64_t& bits) {
-    LPC lpc(order);
-    std::vector<int16_t> coeffs;
-    int used_order = 0;
-    long double energy = 0.0L;
-    if (!lpc.analyze_block_q15(pcm, coeffs, used_order, &energy)) {
+    Block::Encoder estimator(order, false, false);
+    const bool use_zr = zero_run_enabled && should_enable_zero_run_for_block(pcm, order);
+    estimator.set_zero_run_enabled(use_zr);
+    estimator.set_partitioning_enabled(partitioning_enabled);
+    uint64_t bits_normal = 0;
+    uint64_t bits_zr = 0;
+    uint64_t bits_bin = 0;
+    if (!estimator.estimate_bits(pcm, bits_normal, bits_zr, bits_bin)) {
       return false;
     }
-    if (used_order <= 0) return false;
-
-    std::vector<int32_t> residual(pcm.size());
-    lpc.compute_residual_q15(pcm, coeffs, residual);
-    bits = estimate_rice_bits(residual);
+    bits = std::min(bits_normal, std::min(bits_zr, bits_bin));
     return true;
   }
 
@@ -90,7 +123,9 @@ namespace {
       const std::vector<int32_t>& right,
       size_t start,
       size_t size,
-      int order) {
+      int order,
+      bool zero_run_enabled,
+      bool partitioning_enabled) {
     StereoCost cost;
     if (size == 0 || start + size > left.size() || start + size > right.size()) {
       return cost;
@@ -98,9 +133,17 @@ namespace {
 
     std::vector<int32_t> blockL(left.begin() + start, left.begin() + start + size);
     std::vector<int32_t> blockR(right.begin() + start, right.begin() + start + size);
-    cost.lr_valid = estimate_channel_cost(blockL, order, cost.lr_bits);
+    cost.lr_valid = estimate_channel_cost(blockL,
+                                          order,
+                                          zero_run_enabled,
+                                          partitioning_enabled,
+                                          cost.lr_bits);
     uint64_t bits_r = 0;
-    if (estimate_channel_cost(blockR, order, bits_r)) {
+    if (estimate_channel_cost(blockR,
+                              order,
+                              zero_run_enabled,
+                              partitioning_enabled,
+                              bits_r)) {
       if (cost.lr_valid) {
         cost.lr_bits += bits_r;
       } else {
@@ -121,9 +164,17 @@ namespace {
         blockS.data(),
         size
         );
-    cost.ms_valid = estimate_channel_cost(blockM, order, cost.ms_bits);
+    cost.ms_valid = estimate_channel_cost(blockM,
+                                          order,
+                                          zero_run_enabled,
+                                          partitioning_enabled,
+                                          cost.ms_bits);
     uint64_t bits_s = 0;
-    if (estimate_channel_cost(blockS, order, bits_s)) {
+    if (estimate_channel_cost(blockS,
+                              order,
+                              zero_run_enabled,
+                              partitioning_enabled,
+                              bits_s)) {
       if (cost.ms_valid) {
         cost.ms_bits += bits_s;
       } else {
@@ -196,39 +247,6 @@ namespace LAC {
     const bool perBlockStereo = isStereo && (hdr.stereo_mode == 2);
     const uint8_t globalStereoMode = hdr.stereo_mode;
 
-    if (this->zero_run_enabled && this->sample_rate >= 96000 && !blocks.empty()) {
-      const size_t guard_blocks = std::min<size_t>(blocks.size(), 4);
-      Block::Encoder estimator(this->order, this->debug_lpc, this->debug_zr);
-      estimator.set_zero_run_enabled(true);
-      uint64_t normal_bits = 0;
-      uint64_t zr_bits = 0;
-      uint64_t bin_bits = 0;
-      for (size_t i = 0; i < guard_blocks; ++i) {
-        const auto& blk = blocks[i];
-        std::vector<int32_t> blockL(left.begin() + blk.start, left.begin() + blk.start + blk.size);
-        uint64_t bn = 0, bz = 0, bb = 0;
-        if (estimator.estimate_bits(blockL, bn, bz, bb)) {
-          normal_bits += bn;
-          zr_bits += bz;
-          bin_bits += bb;
-        }
-        if (isStereo) {
-          std::vector<int32_t> blockR(right.begin() + blk.start, right.begin() + blk.start + blk.size);
-          if (estimator.estimate_bits(blockR, bn, bz, bb)) {
-            normal_bits += bn;
-            zr_bits += bz;
-            bin_bits += bb;
-          }
-        }
-      }
-      if (normal_bits > 0) {
-        double saving = 1.0 - (static_cast<double>(zr_bits) / static_cast<double>(normal_bits));
-        if (saving < 0.02) {
-          this->zero_run_enabled = false;
-        }
-      }
-    }
-
     std::vector<std::future<std::vector<uint8_t>>> blockTasks;
     blockTasks.reserve(blocks.size());
 
@@ -261,10 +279,14 @@ namespace LAC {
             auto encode_lr = [&]() -> std::vector<uint8_t> {
               std::vector<uint8_t> out;
               std::vector<int32_t> blockL(left.begin() + start, left.begin() + end);
+              bool use_zr_l = this->zero_run_enabled && should_enable_zero_run_for_block(blockL, this->order);
+              blockEnc.set_zero_run_enabled(use_zr_l);
               std::vector<uint8_t> encodedL = blockEnc.encode(blockL);
               out.insert(out.end(), encodedL.begin(), encodedL.end());
               if (isStereo) {
                 std::vector<int32_t> blockR(right.begin() + start, right.begin() + end);
+                bool use_zr_r = this->zero_run_enabled && should_enable_zero_run_for_block(blockR, this->order);
+                blockEnc.set_zero_run_enabled(use_zr_r);
                 std::vector<uint8_t> encodedR = blockEnc.encode(blockR);
                 out.insert(out.end(), encodedR.begin(), encodedR.end());
               }
@@ -282,7 +304,11 @@ namespace LAC {
                   blockSide.data(),
                   block.size
                   );
+              bool use_zr_mid = this->zero_run_enabled && should_enable_zero_run_for_block(blockMid, this->order);
+              blockEnc.set_zero_run_enabled(use_zr_mid);
               std::vector<uint8_t> encodedMid = blockEnc.encode(blockMid);
+              bool use_zr_side = this->zero_run_enabled && should_enable_zero_run_for_block(blockSide, this->order);
+              blockEnc.set_zero_run_enabled(use_zr_side);
               std::vector<uint8_t> encodedSide = blockEnc.encode(blockSide);
               out.insert(out.end(), encodedMid.begin(), encodedMid.end());
               out.insert(out.end(), encodedSide.begin(), encodedSide.end());
@@ -302,7 +328,13 @@ namespace LAC {
               std::vector<uint8_t> lrBytes = encode_lr();
               encodedBytes.insert(encodedBytes.end(), lrBytes.begin(), lrBytes.end());
             } else {
-              StereoCost cost = estimate_stereo_cost(left, right, start, block.size, this->order);
+              StereoCost cost = estimate_stereo_cost(left,
+                                                     right,
+                                                     start,
+                                                     block.size,
+                                                     this->order,
+                                                     this->zero_run_enabled,
+                                                     this->partitioning_enabled);
               bool choose_ms = cost.choose_ms();
               if (this->debug_stereo_est) {
                 LAC_DEBUG_LOG("[stereo-est] block=" << block_idx
