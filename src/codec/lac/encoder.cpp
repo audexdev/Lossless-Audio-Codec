@@ -1,8 +1,11 @@
 #include "encoder.hpp"
 #include <limits>
-#include <future>
 #include <stdexcept>
 #include <string>
+#include <atomic>
+#include <exception>
+#include <mutex>
+#include <queue>
 #include <thread>
 #include <iostream>
 #include "codec/simd/neon.hpp"
@@ -247,127 +250,168 @@ namespace LAC {
     const bool perBlockStereo = isStereo && (hdr.stereo_mode == 2);
     const uint8_t globalStereoMode = hdr.stereo_mode;
 
-    std::vector<std::future<std::vector<uint8_t>>> blockTasks;
-    blockTasks.reserve(blocks.size());
-
-    auto launch_policy = std::thread::hardware_concurrency() > 1
-      ? std::launch::async
-      : std::launch::deferred;
-
-    for (size_t block_idx = 0; block_idx < blocks.size(); ++block_idx) {
-      const auto& block = blocks[block_idx];
-      blockTasks.emplace_back(std::async(
-            launch_policy,
-            [this, &left, &right, isStereo, forceMidSide, perBlockStereo, globalStereoMode, block, block_idx, collector]() -> std::vector<uint8_t> {
-            Block::Encoder blockEnc(this->order, this->debug_lpc, this->debug_zr);
-            blockEnc.set_zero_run_enabled(this->zero_run_enabled);
-            blockEnc.set_partitioning_enabled(this->partitioning_enabled);
-            blockEnc.set_debug_partitions(this->debug_partitions);
-            blockEnc.set_debug_block_index(block_idx);
-            std::vector<uint8_t> encodedBytes;
-            const size_t start = block.start;
-            const size_t end = start + block.size;
-
-            if (collector) {
-            collector->record(std::this_thread::get_id());
-            }
-
-            if (block.size == 0) {
-            return encodedBytes;
-            }
-
-            auto encode_lr = [&]() -> std::vector<uint8_t> {
-              std::vector<uint8_t> out;
-              std::vector<int32_t> blockL(left.begin() + start, left.begin() + end);
-              bool use_zr_l = this->zero_run_enabled && should_enable_zero_run_for_block(blockL, this->order);
-              blockEnc.set_zero_run_enabled(use_zr_l);
-              std::vector<uint8_t> encodedL = blockEnc.encode(blockL);
-              out.insert(out.end(), encodedL.begin(), encodedL.end());
-              if (isStereo) {
-                std::vector<int32_t> blockR(right.begin() + start, right.begin() + end);
-                bool use_zr_r = this->zero_run_enabled && should_enable_zero_run_for_block(blockR, this->order);
-                blockEnc.set_zero_run_enabled(use_zr_r);
-                std::vector<uint8_t> encodedR = blockEnc.encode(blockR);
-                out.insert(out.end(), encodedR.begin(), encodedR.end());
-              }
-              return out;
-            };
-
-            auto encode_ms = [&]() -> std::vector<uint8_t> {
-              std::vector<uint8_t> out;
-              std::vector<int32_t> blockMid(block.size);
-              std::vector<int32_t> blockSide(block.size);
-              SIMD::ms_encode_simd_or_scalar(
-                  left.data() + start,
-                  right.data() + start,
-                  blockMid.data(),
-                  blockSide.data(),
-                  block.size
-                  );
-              bool use_zr_mid = this->zero_run_enabled && should_enable_zero_run_for_block(blockMid, this->order);
-              blockEnc.set_zero_run_enabled(use_zr_mid);
-              std::vector<uint8_t> encodedMid = blockEnc.encode(blockMid);
-              bool use_zr_side = this->zero_run_enabled && should_enable_zero_run_for_block(blockSide, this->order);
-              blockEnc.set_zero_run_enabled(use_zr_side);
-              std::vector<uint8_t> encodedSide = blockEnc.encode(blockSide);
-              out.insert(out.end(), encodedMid.begin(), encodedMid.end());
-              out.insert(out.end(), encodedSide.begin(), encodedSide.end());
-              return out;
-            };
-
-            std::string mode_used = "LR";
-
-            if (!isStereo) {
-              encodedBytes = encode_lr();
-            } else if (forceMidSide) {
-              mode_used = "MS";
-              std::vector<uint8_t> msBytes = encode_ms();
-              encodedBytes.insert(encodedBytes.end(), msBytes.begin(), msBytes.end());
-            } else if (!perBlockStereo) {
-              mode_used = "LR";
-              std::vector<uint8_t> lrBytes = encode_lr();
-              encodedBytes.insert(encodedBytes.end(), lrBytes.begin(), lrBytes.end());
-            } else {
-              StereoCost cost = estimate_stereo_cost(left,
-                                                     right,
-                                                     start,
-                                                     block.size,
-                                                     this->order,
-                                                     this->zero_run_enabled,
-                                                     this->partitioning_enabled);
-              bool choose_ms = cost.choose_ms();
-              if (this->debug_stereo_est) {
-                LAC_DEBUG_LOG("[stereo-est] block=" << block_idx
-                  << " lr_bits=" << (cost.lr_valid ? cost.lr_bits : kMaxCostProxy)
-                  << " ms_bits=" << (cost.ms_valid ? cost.ms_bits : kMaxCostProxy)
-                  << " chosen=" << (choose_ms ? "MS" : "LR") << "\n";
-                );
-              }
-              mode_used = (choose_ms ? "MS" : "LR");
-              encodedBytes.push_back(choose_ms ? 1 : 0);
-              if (choose_ms) {
-                std::vector<uint8_t> msBytes = encode_ms();
-                encodedBytes.insert(encodedBytes.end(), msBytes.begin(), msBytes.end());
-              } else {
-                std::vector<uint8_t> lrBytes = encode_lr();
-                encodedBytes.insert(encodedBytes.end(), lrBytes.begin(), lrBytes.end());
-              }
-            }
-
-            if (this->debug_stereo_est && isStereo) {
-              LAC_DEBUG_LOG("[stereo-mode] global=" << int(globalStereoMode)
-                << " block=" << block_idx
-                << " mode_used=" << mode_used << "\n";
-              );
-            }
-
-            return encodedBytes;
-            }
-      ));
+    std::vector<std::vector<uint8_t>> encodedBlocks(blocks.size());
+    std::queue<size_t> task_queue;
+    for (size_t i = 0; i < blocks.size(); ++i) {
+      task_queue.push(i);
     }
 
-    for (auto& futureBytes : blockTasks) {
-      std::vector<uint8_t> bytes = futureBytes.get();
+    std::mutex queue_mutex;
+    std::mutex error_mutex;
+    std::exception_ptr worker_error;
+    std::atomic<bool> stop_requested{false};
+
+    auto encode_block = [this, &left, &right, &blocks, isStereo, forceMidSide, perBlockStereo, globalStereoMode](size_t block_idx) -> std::vector<uint8_t> {
+      const auto& block = blocks[block_idx];
+      Block::Encoder blockEnc(this->order, this->debug_lpc, this->debug_zr);
+      blockEnc.set_zero_run_enabled(this->zero_run_enabled);
+      blockEnc.set_partitioning_enabled(this->partitioning_enabled);
+      blockEnc.set_debug_partitions(this->debug_partitions);
+      blockEnc.set_debug_block_index(block_idx);
+      std::vector<uint8_t> encodedBytes;
+      const size_t start = block.start;
+      const size_t end = start + block.size;
+
+      if (block.size == 0) {
+        return encodedBytes;
+      }
+
+      auto encode_lr = [&]() -> std::vector<uint8_t> {
+        std::vector<uint8_t> out;
+        std::vector<int32_t> blockL(left.begin() + start, left.begin() + end);
+        bool use_zr_l = this->zero_run_enabled && should_enable_zero_run_for_block(blockL, this->order);
+        blockEnc.set_zero_run_enabled(use_zr_l);
+        std::vector<uint8_t> encodedL = blockEnc.encode(blockL);
+        out.insert(out.end(), encodedL.begin(), encodedL.end());
+        if (isStereo) {
+          std::vector<int32_t> blockR(right.begin() + start, right.begin() + end);
+          bool use_zr_r = this->zero_run_enabled && should_enable_zero_run_for_block(blockR, this->order);
+          blockEnc.set_zero_run_enabled(use_zr_r);
+          std::vector<uint8_t> encodedR = blockEnc.encode(blockR);
+          out.insert(out.end(), encodedR.begin(), encodedR.end());
+        }
+        return out;
+      };
+
+      auto encode_ms = [&]() -> std::vector<uint8_t> {
+        std::vector<uint8_t> out;
+        std::vector<int32_t> blockMid(block.size);
+        std::vector<int32_t> blockSide(block.size);
+        SIMD::ms_encode_simd_or_scalar(
+            left.data() + start,
+            right.data() + start,
+            blockMid.data(),
+            blockSide.data(),
+            block.size
+            );
+        bool use_zr_mid = this->zero_run_enabled && should_enable_zero_run_for_block(blockMid, this->order);
+        blockEnc.set_zero_run_enabled(use_zr_mid);
+        std::vector<uint8_t> encodedMid = blockEnc.encode(blockMid);
+        bool use_zr_side = this->zero_run_enabled && should_enable_zero_run_for_block(blockSide, this->order);
+        blockEnc.set_zero_run_enabled(use_zr_side);
+        std::vector<uint8_t> encodedSide = blockEnc.encode(blockSide);
+        out.insert(out.end(), encodedMid.begin(), encodedMid.end());
+        out.insert(out.end(), encodedSide.begin(), encodedSide.end());
+        return out;
+      };
+
+      std::string mode_used = "LR";
+
+      if (!isStereo) {
+        encodedBytes = encode_lr();
+      } else if (forceMidSide) {
+        mode_used = "MS";
+        std::vector<uint8_t> msBytes = encode_ms();
+        encodedBytes.insert(encodedBytes.end(), msBytes.begin(), msBytes.end());
+      } else if (!perBlockStereo) {
+        mode_used = "LR";
+        std::vector<uint8_t> lrBytes = encode_lr();
+        encodedBytes.insert(encodedBytes.end(), lrBytes.begin(), lrBytes.end());
+      } else {
+        StereoCost cost = estimate_stereo_cost(left,
+                                               right,
+                                               start,
+                                               block.size,
+                                               this->order,
+                                               this->zero_run_enabled,
+                                               this->partitioning_enabled);
+        bool choose_ms = cost.choose_ms();
+        if (this->debug_stereo_est) {
+          LAC_DEBUG_LOG("[stereo-est] block=" << block_idx
+            << " lr_bits=" << (cost.lr_valid ? cost.lr_bits : kMaxCostProxy)
+            << " ms_bits=" << (cost.ms_valid ? cost.ms_bits : kMaxCostProxy)
+            << " chosen=" << (choose_ms ? "MS" : "LR") << "\n";
+          );
+        }
+        mode_used = (choose_ms ? "MS" : "LR");
+        encodedBytes.push_back(choose_ms ? 1 : 0);
+        if (choose_ms) {
+          std::vector<uint8_t> msBytes = encode_ms();
+          encodedBytes.insert(encodedBytes.end(), msBytes.begin(), msBytes.end());
+        } else {
+          std::vector<uint8_t> lrBytes = encode_lr();
+          encodedBytes.insert(encodedBytes.end(), lrBytes.begin(), lrBytes.end());
+        }
+      }
+
+      if (this->debug_stereo_est && isStereo) {
+        LAC_DEBUG_LOG("[stereo-mode] global=" << int(globalStereoMode)
+          << " block=" << block_idx
+          << " mode_used=" << mode_used << "\n";
+        );
+      }
+
+      return encodedBytes;
+    };
+
+    const size_t hardware_threads = std::max<size_t>(1, static_cast<size_t>(std::thread::hardware_concurrency()));
+    const size_t worker_count = std::min(hardware_threads, blocks.size());
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+
+    for (size_t worker_idx = 0; worker_idx < worker_count; ++worker_idx) {
+      workers.emplace_back([&]() {
+        if (collector) {
+          collector->record(std::this_thread::get_id());
+        }
+        while (true) {
+          if (stop_requested.load(std::memory_order_acquire)) {
+            return;
+          }
+
+          size_t block_idx = 0;
+          {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            if (task_queue.empty()) {
+              return;
+            }
+            block_idx = task_queue.front();
+            task_queue.pop();
+          }
+
+          try {
+            encodedBlocks[block_idx] = encode_block(block_idx);
+          } catch (...) {
+            stop_requested.store(true, std::memory_order_release);
+            std::lock_guard<std::mutex> lock(error_mutex);
+            if (!worker_error) {
+              worker_error = std::current_exception();
+            }
+            return;
+          }
+        }
+      });
+    }
+
+    for (auto& worker : workers) {
+      worker.join();
+    }
+
+    if (worker_error) {
+      std::rethrow_exception(worker_error);
+    }
+
+    for (const auto& bytes : encodedBlocks) {
       for (uint8_t b : bytes) {
         writer.write_bits(b, 8);
       }
