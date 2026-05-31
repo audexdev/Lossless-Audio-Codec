@@ -8,6 +8,10 @@
 #include <string>
 #include <vector>
 
+#ifdef NDEBUG
+#error "lac_tests requires active assert checks"
+#endif
+
 void run_zerorun_tests();
 void run_partitioning_tests();
 void run_predictor_tests();

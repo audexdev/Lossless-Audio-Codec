@@ -1,6 +1,8 @@
 # Lossless Audio Codec (LAC)
 
 [![CI](https://github.com/audexdev/Lossless-Audio-Codec/actions/workflows/ci.yml/badge.svg)](https://github.com/audexdev/Lossless-Audio-Codec/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/audexdev/Lossless-Audio-Codec/actions/workflows/codeql.yml/badge.svg)](https://github.com/audexdev/Lossless-Audio-Codec/actions/workflows/codeql.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 LAC is an experimental C++20 lossless audio codec for PCM WAV audio. It is a compact implementation of a custom `.lac` container and bitstream with LPC prediction, adaptive Rice coding, mid/side stereo, zero-run residual coding, residual partitioning, Apple Silicon NEON acceleration, and multithreaded block encoding.
 
@@ -24,7 +26,7 @@ The project is intended for codec experimentation, implementation study, and rep
 
 Current release: `v1.4.0`
 
-The codec currently prioritizes correctness, readability, and experimentation over a frozen public API. Known hardening work remains around malformed input handling, fuzzing, large-file limits, and public packaging. See [SECURITY.md](SECURITY.md) and [docs/format.md](docs/format.md) for the current contract and risk areas.
+The codec currently prioritizes correctness, readability, and experimentation over a frozen public API. Known hardening work remains around malformed input handling, fuzzing, large-file limits, and public packaging. See [SECURITY.md](SECURITY.md), [docs/format.md](docs/format.md), and [docs/supported-formats.md](docs/supported-formats.md) for the current contract and risk areas.
 
 ## Build
 
@@ -91,6 +93,7 @@ Contribution setup, review expectations, and local development commands are docu
 ## Format
 
 The current `.lac` bitstream is documented in [docs/format.md](docs/format.md). The format is versioned internally as frame version `2`, but it is not yet frozen for external compatibility.
+Supported WAV/PCM input and output constraints are documented in [docs/supported-formats.md](docs/supported-formats.md).
 
 ## Security
 
@@ -100,6 +103,7 @@ Malformed audio/container inputs are security-relevant because decoders and pars
 
 Codec correctness, fuzzing readiness, security review, and release review are tracked in the [maintainer workflow](docs/maintainer-workflow.md).
 Release preparation uses the [release checklist](docs/release-checklist.md).
+Fuzzing plans are tracked in the [fuzzing roadmap](docs/fuzzing.md).
 
 ## Repository Hygiene
 

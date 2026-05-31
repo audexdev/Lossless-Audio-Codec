@@ -16,6 +16,7 @@ Use this checklist before tagging a LAC release. The format and API are still ex
 - Confirm `README.md` lists the intended current release.
 - Confirm `CMakeLists.txt` uses the intended project version.
 - Confirm public version headers match the release version once the public API is populated.
+- Confirm `CHANGELOG.md` has release notes for the version being tagged.
 - Confirm the Git tag matches the documented release version.
 
 ## Format And API

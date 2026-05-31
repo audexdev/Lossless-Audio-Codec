@@ -1,0 +1,40 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "27 3 * * 1"
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze C/C++
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4.36.0
+        with:
+          languages: c-cpp
+
+      - name: Configure
+        run: >
+          cmake -S . -B build-codeql
+          -DCMAKE_BUILD_TYPE=Debug
+          -DLAC_BUILD_TESTS=ON
+          -DLAC_TEST_ASSETS_DIR="${{ runner.temp }}/lac-no-assets"
+
+      - name: Build
+        run: cmake --build build-codeql --parallel
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4.36.0

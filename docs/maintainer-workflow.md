@@ -47,6 +47,7 @@ Maintainers should check:
 - malformed chunk and bitstream reads fail cleanly
 - arithmetic on sample, residual, and predictor values avoids undefined behavior
 - CLI input and output paths cannot accidentally clobber source files
+- sanitizer and CodeQL results are reviewed when they flag parser, decoder, or CLI changes
 - security-sensitive findings are reported according to `SECURITY.md`
 
 Public issues should avoid attaching exploitable inputs or minimized crash files when private reporting is more appropriate.

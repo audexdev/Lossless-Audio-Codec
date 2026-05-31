@@ -24,6 +24,12 @@ BlockPayload[block_count]
 
 The block-size table gives the number of samples per channel in each block. Every channel payload in the same block uses the same `block_size`.
 
+Current top-level limits:
+
+- `block_count` must be non-zero.
+- Each `block_size` must be non-zero and no larger than `16384` samples per channel.
+- The total declared sample count must fit within the implementation's decode allocation limits.
+
 ## Frame Header
 
 The frame header is 80 bits, currently 10 bytes:
@@ -70,6 +76,13 @@ side = left - right
 
 The decoder reconstructs left/right from the decoded mid and side vectors.
 
+```text
+left  = mid + ((side + (side & 1)) >> 1)
+right = left - side
+```
+
+The `side & 1` term is part of the format behavior. It preserves the rounding needed when `side` is odd.
+
 ### Per-Block Stereo
 
 When `stereo_mode == 2`, each block starts with an 8-bit stereo flag:
@@ -106,6 +119,44 @@ byte padding to next byte boundary
 
 Fixed predictors currently use orders 0 through 4. The FIR predictor currently uses a predefined two-tap filter. LPC coefficients are stored as signed Q15 coefficients.
 
+### Predictor Reconstruction
+
+For fixed predictors, the first `order` samples are stored as raw residual values:
+
+```text
+sample[i] = residual[i] for i < order
+```
+
+For later samples, reconstruction is:
+
+```text
+sample[i] = residual[i] + prediction[i]
+```
+
+Fixed predictor formulas:
+
+| Order | `prediction[i]` |
+| ---: | --- |
+| `0` | `0` |
+| `1` | `sample[i - 1]` |
+| `2` | `2 * sample[i - 1] - sample[i - 2]` |
+| `3` | `3 * sample[i - 1] - 3 * sample[i - 2] + sample[i - 3]` |
+| `4` | `4 * sample[i - 1] - 6 * sample[i - 2] + 4 * sample[i - 3] - sample[i - 4]` |
+
+The FIR predictor currently has order `2`, taps `{3, -1}`, and shift `2`. The first two samples are raw residual values. Later samples use:
+
+```text
+prediction[i] = (3 * sample[i - 1] - sample[i - 2]) >> 2
+sample[i] = residual[i] + prediction[i]
+```
+
+For LPC, coefficients are stored as signed 16-bit Q15 values. The first `order` samples are raw residual values. Later samples are reconstructed as:
+
+```text
+prediction[i] = sum(coeff[j] * sample[i - j] for j = 1..order) >> 15
+sample[i] = residual[i] + prediction[i]
+```
+
 ## Residual Control
 
 The residual control byte contains the partition and default residual-mode metadata.
@@ -124,6 +175,8 @@ Current limits:
 - minimum partition size: 32 samples
 - maximum partition order: 8
 
+The partition flag must be set when `partition_order > 0` and unset when `partition_order == 0`. Partitioned blocks use stateless Rice adaptation inside each partition. Unpartitioned blocks use stateful Rice adaptation.
+
 Partition sizes are computed as:
 
 ```text
@@ -139,11 +192,133 @@ u2 residual_mode
 u5 initial_k
 ```
 
+The metadata entry is present even when the block is unpartitioned, in which case the partition count is one.
+
 ## Residual Modes
 
 ### Mode 0: Adaptive Rice
 
 Each residual is encoded with signed zigzag mapping and Rice coding using the current `k`. After every residual, `k` is adapted from the accumulated unsigned residual history.
+
+#### Zigzag Mapping
+
+Signed residuals are mapped to unsigned values as:
+
+```text
+u = (uint32(residual) << 1) ^ uint32(residual >> 31)
+```
+
+Decoding maps back with:
+
+```text
+residual = int32((u >> 1) ^ -int32(u & 1))
+```
+
+#### Rice Coding
+
+For unsigned value `u` and parameter `k`:
+
+```text
+q = u >> k
+r = u & ((1 << k) - 1)
+write q one bits
+write one zero bit
+write r as k bits when k > 0
+```
+
+The initial `k` for each residual segment comes from that partition's `u5 initial_k` metadata. `k` is updated after each logical residual sample, including samples represented by zero-run tokens.
+
+#### Stateless Adaptation
+
+Partitioned blocks use stateless adaptation. For each partition, initialize:
+
+```text
+sum = 0
+count = 0
+current_k = initial_k
+```
+
+After each residual sample with unsigned value `u`:
+
+```text
+sum += u
+count += 1
+mean = (sum + (count >> 1)) / count
+k = 0
+while ((1 << k) < mean && k < 31):
+    k += 1
+current_k = k
+```
+
+#### Stateful Adaptation
+
+Unpartitioned blocks use stateful adaptation. For the single residual segment, initialize:
+
+```text
+sum = 0
+count = 0
+current_k = initial_k
+previous_sum = 0
+window_index = 0
+window_filled = 0
+window_sum = 0
+recent_u[256] = all zero
+large_flags[96] = all zero
+zero_flags[96] = all zero
+large_q_count = 0
+zero_q_count = 0
+```
+
+After each residual sample, update `sum` and `count`, then compute the next `current_k`:
+
+```text
+current_u = sum - previous_sum
+previous_sum = sum
+
+micro_index = (count - 1) % 96
+large_q_count -= large_flags[micro_index]
+zero_q_count -= zero_flags[micro_index]
+
+if window_filled < 256:
+    window_filled += 1
+else:
+    window_sum -= recent_u[window_index]
+
+recent_u[window_index] = current_u
+window_sum += current_u
+
+mean = (sum + (count >> 1)) / count
+k = 0
+while ((1 << k) < mean && k < 31):
+    k += 1
+
+q_base = 0 if k >= 31 else (current_u >> k)
+is_large = 1 if q_base > 3 else 0
+is_zero = 1 if q_base == 0 else 0
+
+large_q_count += is_large
+zero_q_count += is_zero
+large_flags[micro_index] = is_large
+zero_flags[micro_index] = is_zero
+
+bias = 0
+if window_filled > 0 and mean > 0:
+    local_mean = (window_sum + (window_filled >> 1)) / window_filled
+    if local_mean * 3 > mean * 4:
+        bias = 1
+    else if local_mean * 4 + 3 < mean * 3:
+        bias = -1
+
+if window_index + 1 >= 96 or window_filled >= 96:
+    window_size = min(window_filled, 96)
+    if large_q_count * 4 >= window_size * 3:
+        bias = min(bias + 1, 1)
+    else if zero_q_count * 5 >= window_size * 4:
+        bias = max(bias - 1, -1)
+
+current_k = clamp(k + bias, 0, 31)
+window_index = (window_index + 1) % 256
+```
 
 ### Mode 1: Zero-Run
 
@@ -158,6 +333,18 @@ Zero-run mode uses 2-bit token tags:
 
 Zero-run lengths are encoded as unsigned Rice values with `k = 2`, then offset by `ZERO_RUN_MIN_LENGTH` (`4`).
 
+For tag `00`, exactly one residual is decoded with the current Rice `k`, then the adaptive model is updated with that residual's unsigned value.
+
+For tag `01`, the encoded run value is decoded with unsigned Rice `k = 2`, then:
+
+```text
+run_length = encoded_value + 4
+```
+
+The decoder emits `run_length` zero residuals. The adaptive model is updated once per emitted zero residual; `sum` does not change and `count` increases by one for each zero.
+
+For tag `10`, a 32-bit zigzag value follows and is decoded as one residual sample. The adaptive model is updated with that residual's unsigned value.
+
 ### Mode 2: Small-Residual Bin Mode
 
 Bin mode uses compact tags for common residuals:
@@ -170,6 +357,8 @@ Bin mode uses compact tags for common residuals:
 | `11` | fallback Rice-coded residual |
 
 The fallback path uses the same adaptive `k` model.
+
+Every bin token represents exactly one residual sample. Tags `00`, `01`, and `10` update the adaptive model with unsigned values `0`, `2 or 1`, and `4 or 3` respectively after sign reconstruction. Tag `11` decodes one Rice-coded residual using the current `k`, then updates the same adaptive model.
 
 ## Padding
 
