@@ -18,7 +18,7 @@ public:
                               std::vector<int32_t>& residual,
                               int* used_order_inout = nullptr) const;
 
-    void restore_from_residual_q15(const std::vector<int32_t>& residual,
+    bool restore_from_residual_q15(const std::vector<int32_t>& residual,
                                    const std::vector<int16_t>& coeffs_q15,
                                    std::vector<int32_t>& out_block) const;
 

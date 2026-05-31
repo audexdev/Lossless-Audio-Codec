@@ -54,6 +54,7 @@ struct FrameHeader {
         if (this->stereo_mode != 0 && this->stereo_mode != 1 && this->stereo_mode != 2) return false;
         if (!is_supported_sample_rate(this->sample_rate)) return false;
         if (this->bit_depth != 16 && this->bit_depth != 24) return false;
+        if (this->reserved != 0) return false;
         return true;
     }
 

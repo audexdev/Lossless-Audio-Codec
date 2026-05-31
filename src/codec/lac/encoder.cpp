@@ -139,9 +139,14 @@ namespace {
 
   inline uint64_t estimate_rice_bits(const std::vector<int32_t>& residual) {
     if (residual.empty()) return 0;
+    auto to_unsigned = [](int32_t r) -> uint32_t {
+      const uint32_t sign_mask =
+        (r < 0) ? std::numeric_limits<uint32_t>::max() : 0u;
+      return (static_cast<uint32_t>(r) << 1) ^ sign_mask;
+    };
     uint64_t sum_u = 0;
     for (int32_t r : residual) {
-      sum_u += (static_cast<uint32_t>(r) << 1) ^ (static_cast<uint32_t>(r >> 31));
+      sum_u += to_unsigned(r);
     }
     const uint64_t mean = (sum_u + (residual.size() >> 1)) / residual.size();
     uint32_t k = 0;
@@ -149,7 +154,7 @@ namespace {
 
     uint64_t bits = 0;
     for (int32_t r : residual) {
-      const uint32_t u = (static_cast<uint32_t>(r) << 1) ^ (static_cast<uint32_t>(r >> 31));
+      const uint32_t u = to_unsigned(r);
       const uint32_t q = (k >= 31u) ? 0u : (u >> k);
       bits += static_cast<uint64_t>(q) + 1u + k;
     }

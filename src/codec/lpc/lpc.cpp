@@ -4,14 +4,6 @@
 #include <limits>
 
 namespace {
-inline int32_t clamp_to_int32(int64_t value) {
-    const int64_t lo = static_cast<int64_t>(std::numeric_limits<int32_t>::min());
-    const int64_t hi = static_cast<int64_t>(std::numeric_limits<int32_t>::max());
-    if (value < lo) return std::numeric_limits<int32_t>::min();
-    if (value > hi) return std::numeric_limits<int32_t>::max();
-    return static_cast<int32_t>(value);
-}
-
 constexpr int kResidualFallbackOrders[] = {12, 10, 8, 6, 4};
 
 inline int detect_used_order_from_coeffs(const std::vector<int16_t>& coeffs_q15,
@@ -236,11 +228,13 @@ void LPC::compute_residual_q15(const std::vector<int32_t>& block,
     }
 }
 
-void LPC::restore_from_residual_q15(const std::vector<int32_t>& residual,
+bool LPC::restore_from_residual_q15(const std::vector<int32_t>& residual,
                                     const std::vector<int16_t>& coeffs_q15,
                                     std::vector<int32_t>& out_block) const {
     size_t N = residual.size();
     out_block.resize(N);
+    const int64_t lo = static_cast<int64_t>(std::numeric_limits<int32_t>::min());
+    const int64_t hi = static_cast<int64_t>(std::numeric_limits<int32_t>::max());
 
     for (size_t n = 0; n < N; ++n) {
         int64_t acc = 0;
@@ -252,6 +246,11 @@ void LPC::restore_from_residual_q15(const std::vector<int32_t>& residual,
         }
         const int64_t pred = (acc >> 15);
         const int64_t sample = pred + static_cast<int64_t>(residual[n]);
-        out_block[n] = clamp_to_int32(sample);
+        if (sample < lo || sample > hi) {
+            out_block.clear();
+            return false;
+        }
+        out_block[n] = static_cast<int32_t>(sample);
     }
+    return true;
 }

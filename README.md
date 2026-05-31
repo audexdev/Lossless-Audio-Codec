@@ -4,9 +4,9 @@
 [![CodeQL](https://github.com/audexdev/Lossless-Audio-Codec/actions/workflows/codeql.yml/badge.svg)](https://github.com/audexdev/Lossless-Audio-Codec/actions/workflows/codeql.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-LAC is an experimental C++20 lossless audio codec for PCM WAV audio. It is a compact implementation of a custom `.lac` container and bitstream with LPC prediction, adaptive Rice coding, mid/side stereo, zero-run residual coding, residual partitioning, Apple Silicon NEON acceleration, and multithreaded block encoding.
+LAC is an experimental CLI-first C++20 lossless audio codec for PCM WAV audio. It is a compact implementation of a custom `.lac` container and bitstream with LPC prediction, adaptive Rice coding, mid/side stereo, zero-run residual coding, residual partitioning, Apple Silicon NEON acceleration, and multithreaded block encoding.
 
-The project is intended for codec experimentation, implementation study, and reproducible work on lossless audio compression internals. The file format is still experimental and should not yet be treated as a long-term archival format.
+The current product contract is `lac_cli encode` followed by `lac_cli decode` for the documented PCM WAV domain. The project is intended for codec experimentation, implementation study, and reproducible work on lossless audio compression internals. The file format is still experimental and should not yet be treated as a long-term archival format.
 
 ## Features
 
@@ -68,6 +68,8 @@ Choose a stereo mode explicitly:
 ./build/lac_cli encode input.wav output.lac --stereo-mode=ms
 ```
 
+Stereo encoding defaults to automatic per-block LR or mid/side selection. Mono input always uses LR metadata. Restored WAV files preserve PCM samples, channel count, sample rate, and bit depth, but ancillary WAV chunks are not copied. Input and output paths must refer to different files.
+
 Limit encoder worker threads:
 
 ```sh
@@ -86,12 +88,13 @@ Run the built-in synthetic self-test:
 Build and run the CTest suite:
 
 ```sh
-cmake -S . -B build-tests -DCMAKE_BUILD_TYPE=Debug -DLAC_BUILD_TESTS=ON
-cmake --build build-tests --parallel
-ctest --test-dir build-tests --output-on-failure
+mkdir -p /tmp/empty-lac-assets
+cmake -S . -B build-tests -DCMAKE_BUILD_TYPE=Debug -DLAC_BUILD_TESTS=ON -DLAC_TEST_ASSETS_DIR=/tmp/empty-lac-assets
+cmake --build build-tests --parallel 4
+LAC_THREADS=4 ctest --test-dir build-tests --output-on-failure
 ```
 
-If the local `assets/` directory is present, the E2E tests also run the larger WAV fixtures in that directory. In clean checkouts and CI, the test suite falls back to generated WAV fixtures so the repository remains self-contained.
+The default CTest configuration uses lightweight generated WAV fixtures and exercises both internal codec paths and `lac_cli` subprocess roundtrips. To opt into larger local E2E fixtures, configure with `-DLAC_TEST_ASSETS_DIR="$PWD/assets"`. The generated fixtures keep clean checkouts and routine development self-contained.
 
 Set `LAC_THREADS=N` to cap encoder worker threads during tests. The heavier `test_all.sh` asset roundtrip script defaults to `LAC_THREADS=12` unless the environment already sets a different value.
 

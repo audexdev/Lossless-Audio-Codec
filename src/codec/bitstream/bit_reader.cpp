@@ -82,10 +82,38 @@ uint32_t BitReader::read_bits(int nbits) {
     return value;
 }
 
+bool BitReader::read_unary_ones(uint32_t max_ones, uint32_t& ones) {
+    ones = 0;
+    while (this->byte_pos < this->size) {
+        if (this->bit_pos == 0 && this->data[this->byte_pos] == 0xFFu) {
+            if (max_ones - ones < 8u) return false;
+            ones += 8u;
+            ++this->byte_pos;
+            continue;
+        }
+
+        const uint32_t bit = this->read_bit();
+        if (this->error) return false;
+        if (bit == 0u) return true;
+        if (ones == max_ones) return false;
+        ++ones;
+    }
+
+    this->mark_error();
+    return false;
+}
+
 void BitReader::align_to_byte() {
     if (this->bit_pos == 0) return;
     this->bit_pos = 0;
     this->byte_pos++;
+}
+
+bool BitReader::consume_zero_padding_to_byte() {
+    while (this->bit_pos != 0) {
+        if (this->read_bit() != 0u || this->error) return false;
+    }
+    return true;
 }
 
 bool BitReader::eof() const {

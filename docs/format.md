@@ -27,8 +27,10 @@ The block-size table gives the number of samples per channel in each block. Ever
 Current top-level limits:
 
 - `block_count` must be non-zero.
+- `block_count` must not exceed `1048576`, and the complete block-size table must be present before allocation.
 - Each `block_size` must be non-zero and no larger than `16384` samples per channel.
-- The total declared sample count must fit within the implementation's decode allocation limits.
+- Every non-final block must contain at least `256` samples per channel. The final block may be shorter.
+- The total declared sample count must fit within the implementation's 1 GiB decoded-PCM allocation limit and the classic RIFF/WAV output size limit.
 
 ## Frame Header
 
@@ -43,7 +45,7 @@ The frame header is 80 bits, currently 10 bytes:
 | sample_rate_low | 16 | low 16 bits of sample rate |
 | sample_rate_high | 8 | high 8 bits of sample rate |
 | bit_depth | 8 | `16` or `24` |
-| reserved | 8 | written as `0` |
+| reserved | 8 | must be `0` |
 
 Supported sample rates are currently:
 
@@ -92,7 +94,7 @@ When `stereo_mode == 2`, each block starts with an 8-bit stereo flag:
 | `0` | block uses LR payloads |
 | `1` | block uses mid/side payloads |
 
-Values other than `0` or `1` are non-canonical and should be rejected by future hardened decoders.
+Values other than `0` or `1` are non-canonical and are rejected.
 
 ## Channel Block Layout
 
@@ -117,7 +119,7 @@ byte padding to next byte boundary
 | `1` | FIR predictor |
 | `2` | LPC predictor |
 
-Fixed predictors currently use orders 0 through 4. The FIR predictor currently uses a predefined two-tap filter. LPC coefficients are stored as signed Q15 coefficients.
+Fixed predictors use orders 0 through 4. The FIR predictor uses exactly order `2` with a predefined two-tap filter. LPC predictors use orders 1 through 32, and their order must be smaller than the channel block size. LPC coefficients are stored as signed Q15 coefficients.
 
 ### Predictor Reconstruction
 
@@ -150,12 +152,15 @@ prediction[i] = (3 * sample[i - 1] - sample[i - 2]) >> 2
 sample[i] = residual[i] + prediction[i]
 ```
 
-For LPC, coefficients are stored as signed 16-bit Q15 values. The first `order` samples are raw residual values. Later samples are reconstructed as:
+For LPC, coefficients are stored as signed 16-bit Q15 values. Every sample uses the available preceding reconstructed samples, up to `order` taps. For early samples, taps that would refer before the start of the block are omitted:
 
 ```text
-prediction[i] = sum(coeff[j] * sample[i - j] for j = 1..order) >> 15
+available_taps = min(i, order)
+prediction[i] = sum(coeff[j] * sample[i - j] for j = 1..available_taps) >> 15
 sample[i] = residual[i] + prediction[i]
 ```
+
+For `i == 0`, `available_taps` is zero and the prediction is zero.
 
 ## Residual Control
 
@@ -165,7 +170,7 @@ The residual control byte contains the partition and default residual-mode metad
 | --- | --- |
 | 7 | partition flag |
 | 6..5 | default residual mode |
-| 4 | reserved |
+| 4 | reserved, must be `0` |
 | 3..0 | partition order |
 
 If the partition flag is unset, the block has one partition. If set, partition count is `1 << partition_order`.
@@ -175,7 +180,7 @@ Current limits:
 - minimum partition size: 32 samples
 - maximum partition order: 8
 
-The partition flag must be set when `partition_order > 0` and unset when `partition_order == 0`. Partitioned blocks use stateless Rice adaptation inside each partition. Unpartitioned blocks use stateful Rice adaptation.
+The partition flag must be set when `partition_order > 0` and unset when `partition_order == 0`. The default residual mode must be `0`, `1`, or `2`, and it must match the first partition metadata entry. Partitioned blocks use stateless Rice adaptation inside each partition. Unpartitioned blocks use stateful Rice adaptation.
 
 Partition sizes are computed as:
 
@@ -205,13 +210,15 @@ Each residual is encoded with signed zigzag mapping and Rice coding using the cu
 Signed residuals are mapped to unsigned values as:
 
 ```text
-u = (uint32(residual) << 1) ^ uint32(residual >> 31)
+sign_mask = UINT32_MAX when residual < 0, otherwise 0
+u = (uint32(residual) << 1) ^ sign_mask
 ```
 
 Decoding maps back with:
 
 ```text
-residual = int32((u >> 1) ^ -int32(u & 1))
+residual = (u >> 1)              when (u & 1) == 0
+residual = -((u >> 1) + 1)       when (u & 1) == 1
 ```
 
 #### Rice Coding
@@ -362,12 +369,14 @@ Every bin token represents exactly one residual sample. Tags `00`, `01`, and `10
 
 ## Padding
 
-Each channel block is flushed to the next byte boundary after residual encoding. Padding bits do not carry data.
+Each channel block is flushed to the next byte boundary after residual encoding. Padding bits must be zero. Non-zero padding is rejected as non-canonical.
 
 ## Integrity
 
-The current format does not include a checksum, frame CRC, block CRC, or authenticated length field. Decoders should therefore validate all structural fields strictly and reject trailing garbage, impossible block sizes, invalid residual tags, and non-canonical metadata.
+The current format does not include a checksum, frame CRC, block CRC, or authenticated length field. Decoders validate structural fields strictly and reject trailing garbage, impossible block sizes, invalid residual tags, Rice values or predictor reconstruction outside the signed 32-bit domain, non-zero reserved fields or padding, and non-canonical metadata. Without an integrity field, a modified payload can still decode successfully if it remains structurally valid and produces in-range PCM samples.
 
 ## Compatibility
 
 The format version is currently `2`, but the format is still experimental. Future work may add stronger validation, checksums, fuzzed compatibility tests, streaming decode constraints, or a frozen public specification.
+
+The canonical version `2` byte sequences emitted by the encoder are unchanged by decoder hardening. Hardened decoders may reject version `2` byte sequences that older permissive decoders accepted when those sequences contain non-canonical reserved fields, metadata, padding, stereo flags, block tables, or trailing payload bytes.

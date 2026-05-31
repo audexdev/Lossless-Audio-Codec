@@ -60,11 +60,13 @@ uint32_t read_rice_unsigned(BitReader& reader, uint32_t k) {
 }
 
 uint32_t zigzag_encode_local(int32_t v) {
-    return (static_cast<uint32_t>(v) << 1) ^ static_cast<uint32_t>(v >> 31);
+    const uint32_t sign_mask = (v < 0) ? ~uint32_t{0} : 0u;
+    return (static_cast<uint32_t>(v) << 1) ^ sign_mask;
 }
 
 int32_t zigzag_decode_local(uint32_t u) {
-    return static_cast<int32_t>((u >> 1) ^ -static_cast<int32_t>(u & 1u));
+    if ((u & 1u) == 0u) return static_cast<int32_t>(u >> 1);
+    return static_cast<int32_t>(-static_cast<int64_t>((u >> 1) + 1u));
 }
 
 uint32_t adapt_k_stateless_local(uint64_t sum, uint32_t count) {
@@ -237,7 +239,7 @@ void roundtrip_block(const std::vector<int32_t>& pcm, bool enable_zr) {
                 return (q << k) | rem;
             };
             auto zigzag_decode = [](uint32_t u) -> int32_t {
-                return static_cast<int32_t>((u >> 1) ^ -static_cast<int32_t>(u & 1u));
+                return zigzag_decode_local(u);
             };
             std::vector<int32_t> residual(pcm.size(), 0);
             uint32_t idx = 0;
@@ -289,7 +291,7 @@ void roundtrip_block(const std::vector<int32_t>& pcm, bool enable_zr) {
                         first_escape_val = zigzag_decode(zz);
                     }
                     residual[idx++] = zigzag_decode(zz);
-                    uint32_t u = (static_cast<uint32_t>(residual[idx - 1]) << 1) ^ (static_cast<uint32_t>(residual[idx - 1] >> 31));
+                    uint32_t u = zigzag_encode_local(residual[idx - 1]);
                     sum_u += u;
                     current_k = Rice::adapt_k(sum_u, idx, adapt_state);
                 } else {
@@ -299,7 +301,7 @@ void roundtrip_block(const std::vector<int32_t>& pcm, bool enable_zr) {
             }
             std::vector<int32_t> pcm_dbg;
             LPC lpc(order);
-            lpc.restore_from_residual_q15(residual, coeffs, pcm_dbg);
+            assert(lpc.restore_from_residual_q15(residual, coeffs, pcm_dbg));
             std::cerr << "manual decode mode=" << m << " k0=" << k0
                       << " residual_first=" << residual[0]
                       << " pcm_first=" << (pcm_dbg.empty() ? 0 : pcm_dbg[0])

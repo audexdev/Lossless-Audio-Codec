@@ -6,10 +6,11 @@
 #include "codec/frame/frame_header.hpp"
 #include "codec/lac/decoder.hpp"
 #include "codec/lac/encoder.hpp"
+#include "codec/rice/rice.hpp"
 #include <cassert>
 #include <cstdint>
 #include <iostream>
-#include <stdexcept>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -123,30 +124,106 @@ void verify_block_roundtrip(const std::vector<int32_t>& pcm,
     assert(decoded == pcm);
 }
 
-void expect_fir_order_throw(uint8_t fir_order) {
+void expect_fir_order_reject(uint8_t fir_order) {
     std::vector<uint8_t> buf = {1u, fir_order}; // predictor_type=FIR, order=fir_order
     BitReader br(buf);
     Block::Decoder dec;
     std::vector<int32_t> decoded;
-    bool threw = false;
-    try {
-        (void)dec.decode(br, 64, decoded);
-    } catch (const std::runtime_error&) {
-        threw = true;
+    assert(!dec.decode(br, 64, decoded));
+}
+
+std::vector<uint8_t> make_manual_fixed_zero_block(uint8_t control,
+                                                  uint8_t metadata_mode = 0,
+                                                  bool nonzero_padding = false) {
+    BitWriter bw;
+    bw.write_bits(0u, 8); // fixed predictor
+    bw.write_bits(0u, 8); // fixed order 0
+    bw.write_bits(control, 8);
+    bw.write_bits(metadata_mode, 2);
+    bw.write_bits(nonzero_padding ? 1u : 0u, 5);
+    bw.write_bit(0u); // Rice quotient terminator for zero
+    if (nonzero_padding) {
+        bw.write_bit(0u); // Rice k=1 remainder
+        bw.write_bit(1u); // Non-canonical byte padding
     }
-    if (!threw) {
-        std::cerr << "expected runtime_error for FIR order=" << static_cast<int>(fir_order) << "\n";
-        assert(false);
-    }
+    bw.flush_to_byte();
+    return bw.get_buffer();
+}
+
+void expect_block_reject(const std::vector<uint8_t>& buf, uint32_t block_size = 1) {
+    BitReader br(buf);
+    Block::Decoder dec;
+    std::vector<int32_t> decoded;
+    assert(!dec.decode(br, block_size, decoded));
+}
+
+std::vector<uint8_t> make_rice_overflow_block() {
+    BitWriter bw;
+    bw.write_bits(0u, 8); // fixed predictor
+    bw.write_bits(0u, 8); // fixed order 0
+    bw.write_bits(0u, 8); // residual control
+    bw.write_bits(0u, 2); // Rice mode
+    bw.write_bits(31u, 5);
+    bw.write_bit(1u);
+    bw.write_bit(1u); // q=2 cannot fit when k=31
+    bw.flush_to_byte();
+    return bw.get_buffer();
+}
+
+std::vector<uint8_t> make_fixed_reconstruction_overflow_block() {
+    BitWriter bw;
+    bw.write_bits(0u, 8); // fixed predictor
+    bw.write_bits(1u, 8); // fixed order 1
+    bw.write_bits(0u, 8); // residual control
+    bw.write_bits(0u, 2); // Rice mode
+    bw.write_bits(31u, 5);
+    Rice::encode(bw, std::numeric_limits<int32_t>::max(), 31u);
+    Rice::encode(bw, 1, 31u);
+    bw.flush_to_byte();
+    return bw.get_buffer();
 }
 
 } // namespace
 
 void run_partitioning_tests() {
     {
-        expect_fir_order_throw(0);
-        expect_fir_order_throw(1);
+        const std::vector<uint8_t> unary_bytes = {0xFFu, 0xFFu, 0x7Fu};
+        BitReader br(unary_bytes);
+        uint32_t ones = 0;
+        assert(br.read_unary_ones(16u, ones));
+        assert(ones == 16u);
+        assert(br.bits_remaining() == 7u);
+
+        const std::vector<uint8_t> overflow_bytes = {0xFFu};
+        BitReader overflow(overflow_bytes);
+        assert(!overflow.read_unary_ones(7u, ones));
+
+        BitWriter min_writer;
+        Rice::encode(min_writer, std::numeric_limits<int32_t>::min(), 31u);
+        min_writer.flush_to_byte();
+        BitReader min_reader(min_writer.get_buffer());
+        int32_t min_value = 0;
+        assert(Rice::decode(min_reader, 31u, min_value));
+        assert(min_value == std::numeric_limits<int32_t>::min());
+        std::cout << "unary rice reader tests ok\n";
+    }
+
+    {
+        expect_fir_order_reject(0);
+        expect_fir_order_reject(1);
+        expect_fir_order_reject(3);
         std::cout << "fir order validation tests ok\n";
+    }
+
+    {
+        expect_block_reject(make_manual_fixed_zero_block(Block::RESIDUAL_RESERVED_MASK));
+        expect_block_reject(make_manual_fixed_zero_block(1u)); // order without partition flag
+        expect_block_reject(make_manual_fixed_zero_block(3u << 5)); // reserved residual mode
+        expect_block_reject(make_manual_fixed_zero_block(0u, 1u)); // control/metadata mismatch
+        expect_block_reject(make_manual_fixed_zero_block(0u, 0u, true)); // non-zero padding
+        expect_block_reject(make_rice_overflow_block());
+        expect_block_reject(make_fixed_reconstruction_overflow_block(), 2);
+        std::cout << "canonical block metadata tests ok\n";
     }
 
     {

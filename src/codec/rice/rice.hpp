@@ -30,7 +30,7 @@ public:
 
     static void encode(BitWriter& w, int32_t value, uint32_t k);
 
-    static int32_t decode(BitReader& r, uint32_t k);
+    static bool decode(BitReader& r, uint32_t k, int32_t& value);
 
     // Compute optimal k from residual block
     static uint32_t compute_k(const std::vector<int32_t>& residuals);

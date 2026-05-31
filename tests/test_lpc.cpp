@@ -17,6 +17,7 @@ void run_partitioning_tests();
 void run_predictor_tests();
 void run_e2e_tests();
 void run_decoder_error_tests();
+void run_wav_validation_tests();
 void run_encoder_validation_tests();
 void run_thread_limit_tests();
 
@@ -25,7 +26,8 @@ namespace {
 constexpr int kCandidates[] = {4, 6, 8, 10, 12};
 
 inline uint32_t unsigned_from_residual(int32_t r) {
-    return (static_cast<uint32_t>(r) << 1) ^ (static_cast<uint32_t>(r >> 31));
+    const uint32_t sign_mask = (r < 0) ? std::numeric_limits<uint32_t>::max() : 0u;
+    return (static_cast<uint32_t>(r) << 1) ^ sign_mask;
 }
 
 uint64_t estimate_rice_bits(const std::vector<int32_t>& residual) {
@@ -181,6 +183,7 @@ int main() {
     run_encoder_validation_tests();
     run_thread_limit_tests();
     run_decoder_error_tests();
+    run_wav_validation_tests();
     run_e2e_tests();
     return 0;
 }

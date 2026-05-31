@@ -5,17 +5,23 @@
 #include <cmath>
 #include <chrono>
 #include <algorithm>
+#include <filesystem>
 #include <limits>
 #include <stdexcept>
 #include "io/wav_io.hpp"
 #include "codec/lac/encoder.hpp"
 #include "codec/lac/decoder.hpp"
 
+namespace {
+constexpr uint64_t MAX_LAC_INPUT_BYTES = 1ULL << 30;
+}
+
 static bool load_file(const std::string& path, std::vector<uint8_t>& data) {
   std::ifstream f(path, std::ios::binary);
   if (!f) return false;
   f.seekg(0, std::ios::end);
   std::streamsize size = f.tellg();
+  if (size < 0 || static_cast<uint64_t>(size) > MAX_LAC_INPUT_BYTES) return false;
   f.seekg(0, std::ios::beg);
   data.resize(static_cast<size_t>(size));
   if (size > 0) {
@@ -26,10 +32,25 @@ static bool load_file(const std::string& path, std::vector<uint8_t>& data) {
 }
 
 static bool save_file(const std::string& path, const std::vector<uint8_t>& data) {
+  if (data.size() > static_cast<size_t>(std::numeric_limits<std::streamsize>::max())) return false;
   std::ofstream f(path, std::ios::binary);
   if (!f) return false;
   if (!data.empty()) f.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+  f.close();
   return f.good();
+}
+
+static bool paths_refer_to_same_file(const std::string& input_path, const std::string& output_path) {
+  std::error_code ec;
+  if (std::filesystem::equivalent(input_path, output_path, ec)) {
+    return true;
+  }
+
+  ec.clear();
+  const auto normalized_input = std::filesystem::weakly_canonical(input_path, ec);
+  if (ec) return false;
+  const auto normalized_output = std::filesystem::weakly_canonical(output_path, ec);
+  return !ec && normalized_input == normalized_output;
 }
 
 static bool parse_threads_flag(const std::string& flag, size_t& out_threads) {
@@ -60,7 +81,7 @@ static bool parse_threads_flag(const std::string& flag, size_t& out_threads) {
 
 static void usage() {
   std::cerr << "Usage:\n";
-  std::cerr << "  lac_cli encode input.wav output.lac [--stereo-mode=lr|ms] [--threads=N] [--debug-threads] [--debug-lpc] [--debug-zr] [--debug-partitions] [--no-partitioning]\n";
+  std::cerr << "  lac_cli encode input.wav output.lac [--stereo-mode=lr|ms] [--threads=N] [--debug-threads] [--debug-lpc] [--debug-stereo-est] [--debug-zr] [--debug-partitions] [--no-partitioning]\n";
   std::cerr << "  lac_cli decode input.lac output.wav [--debug-threads]\n";
   std::cerr << "  lac_cli selftest\n";
 }
@@ -81,6 +102,10 @@ int main(int argc, char** argv) {
       }
       std::string in_path = argv[2];
       std::string out_path = argv[3];
+      if (paths_refer_to_same_file(in_path, out_path)) {
+        std::cerr << "Input and output paths must be different\n";
+        return 1;
+      }
       uint8_t stereo_mode = 2; // default to auto; allow override via flags
       bool debug_threads = false;
       bool debug_lpc = false;
@@ -176,6 +201,10 @@ int main(int argc, char** argv) {
       }
       std::string in_path = argv[2];
       std::string out_path = argv[3];
+      if (paths_refer_to_same_file(in_path, out_path)) {
+        std::cerr << "Input and output paths must be different\n";
+        return 1;
+      }
       bool debug_threads = false;
       for (int i = 4; i < argc; ++i) {
         std::string flag = argv[i];

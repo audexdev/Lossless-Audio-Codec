@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(LAC_BUILD_TESTS "Build LAC tests" OFF)
-set(LAC_TEST_ASSETS_DIR "${PROJECT_SOURCE_DIR}/assets" CACHE PATH "Optional directory containing WAV fixtures for LAC tests")
+set(LAC_TEST_ASSETS_DIR "${PROJECT_BINARY_DIR}/lac-test-assets" CACHE PATH "Optional directory containing WAV fixtures for LAC tests")
 
 find_package(Threads REQUIRED)
 
@@ -71,4 +71,15 @@ if(LAC_BUILD_TESTS)
         target_compile_options(lac_tests PRIVATE -UNDEBUG)
     endif()
     add_test(NAME lac_tests COMMAND lac_tests)
+
+    add_executable(lac_cli_tests
+        tests/test_cli.cpp
+    )
+    target_link_libraries(lac_cli_tests PRIVATE lac)
+    if(MSVC)
+        target_compile_options(lac_cli_tests PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(lac_cli_tests PRIVATE -UNDEBUG)
+    endif()
+    add_test(NAME lac_cli_tests COMMAND lac_cli_tests $<TARGET_FILE:lac_cli>)
 endif()
