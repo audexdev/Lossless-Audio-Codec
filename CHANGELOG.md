@@ -8,6 +8,7 @@ All notable user-facing changes should be documented here. LAC is still experime
 - Added CI coverage for Debug tests, Release builds, and ASan/UBSan smoke tests on GitHub Actions.
 - Added self-contained generated WAV fixtures for clean-checkout CI test runs.
 - Updated E2E tests to read back temporary `.lac` files before decode.
+- Added encoder thread limiting through `LAC_THREADS` and `lac_cli encode --threads=N`.
 - Removed tracked editor cache files and generated compile database symlink from source control.
 - Expanded repository roadmap tracking for correctness, fuzzing, security hardening, and release readiness.
 

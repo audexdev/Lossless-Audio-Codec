@@ -68,6 +68,13 @@ Choose a stereo mode explicitly:
 ./build/lac_cli encode input.wav output.lac --stereo-mode=ms
 ```
 
+Limit encoder worker threads:
+
+```sh
+./build/lac_cli encode input.wav output.lac --threads=12
+LAC_THREADS=12 ./build/lac_cli encode input.wav output.lac
+```
+
 Run the built-in synthetic self-test:
 
 ```sh
@@ -85,6 +92,8 @@ ctest --test-dir build-tests --output-on-failure
 ```
 
 If the local `assets/` directory is present, the E2E tests also run the larger WAV fixtures in that directory. In clean checkouts and CI, the test suite falls back to generated WAV fixtures so the repository remains self-contained.
+
+Set `LAC_THREADS=N` to cap encoder worker threads during tests. The heavier `test_all.sh` asset roundtrip script defaults to `LAC_THREADS=12` unless the environment already sets a different value.
 
 ## Contributing
 

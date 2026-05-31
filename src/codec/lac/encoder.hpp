@@ -26,6 +26,7 @@ public:
     void set_zero_run_enabled(bool enabled);
     void set_partitioning_enabled(bool enabled);
     void set_debug_partitions(bool enabled);
+    void set_thread_count(size_t max_threads);
 
 private:
     uint8_t order;
@@ -38,6 +39,7 @@ private:
     bool zero_run_enabled;
     bool partitioning_enabled;
     bool debug_partitions;
+    size_t thread_count;
     std::vector<uint32_t> candidates;
 
     uint32_t select_block_size(const std::vector<int32_t>& left,

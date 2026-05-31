@@ -1,4 +1,6 @@
 #include "encoder.hpp"
+#include <cerrno>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -91,6 +93,35 @@ namespace {
       return false;
     }
     return bits_zr < std::min(bits_normal, bits_bin);
+  }
+
+  size_t parse_thread_limit(const char* value) {
+    if (value == nullptr || value[0] == '\0') {
+      return 0;
+    }
+    for (const char* p = value; *p != '\0'; ++p) {
+      if (*p < '0' || *p > '9') {
+        throw std::invalid_argument("LAC_THREADS must be a positive integer");
+      }
+    }
+
+    errno = 0;
+    char* end = nullptr;
+    unsigned long long parsed = std::strtoull(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed == 0) {
+      throw std::invalid_argument("LAC_THREADS must be a positive integer");
+    }
+    if (parsed > static_cast<unsigned long long>(std::numeric_limits<size_t>::max())) {
+      throw std::invalid_argument("LAC_THREADS is too large");
+    }
+    return static_cast<size_t>(parsed);
+  }
+
+  size_t resolve_thread_limit(size_t explicit_limit) {
+    if (explicit_limit > 0) {
+      return explicit_limit;
+    }
+    return parse_thread_limit(std::getenv("LAC_THREADS"));
   }
 
   double block_slope_penalty(const std::vector<int32_t>& channel, size_t position, size_t length) {
@@ -242,6 +273,7 @@ namespace LAC {
     zero_run_enabled(true),
     partitioning_enabled(true),
     debug_partitions(false),
+    thread_count(0),
     candidates{256, 512, 1024, 2048, 4096, 8192, 16384} {}
 
   std::vector<uint8_t> Encoder::encode(
@@ -417,7 +449,11 @@ namespace LAC {
       return encodedBytes;
     };
 
-    const size_t hardware_threads = std::max<size_t>(1, static_cast<size_t>(std::thread::hardware_concurrency()));
+    size_t hardware_threads = std::max<size_t>(1, static_cast<size_t>(std::thread::hardware_concurrency()));
+    const size_t thread_limit = resolve_thread_limit(this->thread_count);
+    if (thread_limit > 0) {
+      hardware_threads = std::min(hardware_threads, thread_limit);
+    }
     const size_t worker_count = std::min(hardware_threads, blocks.size());
     std::vector<std::thread> workers;
     workers.reserve(worker_count);
@@ -484,6 +520,10 @@ namespace LAC {
 
   void Encoder::set_debug_partitions(bool enabled) {
     this->debug_partitions = enabled;
+  }
+
+  void Encoder::set_thread_count(size_t max_threads) {
+    this->thread_count = max_threads;
   }
 
   uint32_t Encoder::select_block_size(const std::vector<int32_t>& left,

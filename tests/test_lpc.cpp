@@ -18,6 +18,7 @@ void run_predictor_tests();
 void run_e2e_tests();
 void run_decoder_error_tests();
 void run_encoder_validation_tests();
+void run_thread_limit_tests();
 
 namespace {
 
@@ -178,6 +179,7 @@ int main() {
     run_partitioning_tests();
     run_predictor_tests();
     run_encoder_validation_tests();
+    run_thread_limit_tests();
     run_decoder_error_tests();
     run_e2e_tests();
     return 0;

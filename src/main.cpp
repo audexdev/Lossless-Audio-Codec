@@ -5,6 +5,7 @@
 #include <cmath>
 #include <chrono>
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include "io/wav_io.hpp"
 #include "codec/lac/encoder.hpp"
@@ -31,9 +32,35 @@ static bool save_file(const std::string& path, const std::vector<uint8_t>& data)
   return f.good();
 }
 
+static bool parse_threads_flag(const std::string& flag, size_t& out_threads) {
+  const std::string prefix = "--threads=";
+  if (flag.rfind(prefix, 0) != 0) {
+    return false;
+  }
+
+  const std::string value = flag.substr(prefix.size());
+  if (value.empty()) {
+    throw std::invalid_argument("--threads requires a positive integer");
+  }
+  for (char c : value) {
+    if (c < '0' || c > '9') {
+      throw std::invalid_argument("--threads requires a positive integer");
+    }
+  }
+
+  size_t consumed = 0;
+  const unsigned long long parsed = std::stoull(value, &consumed, 10);
+  if (consumed != value.size() || parsed == 0 ||
+      parsed > static_cast<unsigned long long>(std::numeric_limits<size_t>::max())) {
+    throw std::invalid_argument("--threads requires a positive integer");
+  }
+  out_threads = static_cast<size_t>(parsed);
+  return true;
+}
+
 static void usage() {
   std::cerr << "Usage:\n";
-  std::cerr << "  lac_cli encode input.wav output.lac [--stereo-mode=lr|ms] [--debug-threads] [--debug-lpc] [--debug-zr] [--debug-partitions] [--no-partitioning]\n";
+  std::cerr << "  lac_cli encode input.wav output.lac [--stereo-mode=lr|ms] [--threads=N] [--debug-threads] [--debug-lpc] [--debug-zr] [--debug-partitions] [--no-partitioning]\n";
   std::cerr << "  lac_cli decode input.lac output.wav [--debug-threads]\n";
   std::cerr << "  lac_cli selftest\n";
 }
@@ -61,6 +88,7 @@ int main(int argc, char** argv) {
       bool debug_zr = false;
       bool debug_partitions = false;
       bool partitioning_enabled = true;
+      size_t thread_count = 0;
       for (int i = 4; i < argc; ++i) {
         std::string flag = argv[i];
         if (flag == "--debug-threads") {
@@ -79,6 +107,8 @@ int main(int argc, char** argv) {
           stereo_mode = 0;
         } else if (flag == "--stereo-mode=ms") {
           stereo_mode = 1;
+        } else if (parse_threads_flag(flag, thread_count)) {
+          // Parsed above.
         } else {
           usage();
           return 1;
@@ -102,6 +132,7 @@ int main(int argc, char** argv) {
       LAC::Encoder encoder(12, effective_stereo_mode, sample_rate, bit_depth, debug_lpc, debug_stereo_est, debug_zr);
       encoder.set_partitioning_enabled(partitioning_enabled);
       encoder.set_debug_partitions(debug_partitions);
+      encoder.set_thread_count(thread_count);
       LAC::ThreadCollector collector;
       LAC::ThreadCollector* collector_ptr = (debug_threads ? &collector : nullptr);
       std::vector<uint8_t> bitstream = encoder.encode(left, right, collector_ptr);
@@ -110,6 +141,7 @@ int main(int argc, char** argv) {
         baseline.set_zero_run_enabled(false);
         baseline.set_partitioning_enabled(partitioning_enabled);
         baseline.set_debug_partitions(debug_partitions);
+        baseline.set_thread_count(thread_count);
         std::vector<uint8_t> baseline_bs = baseline.encode(left, right);
         double gain = 0.0;
         if (!baseline_bs.empty()) {

@@ -266,6 +266,27 @@ void run_encoder_validation_tests() {
     std::cout << "encoder validation tests ok\n";
 }
 
+void run_thread_limit_tests() {
+    constexpr size_t frames = 65536;
+    std::vector<int32_t> left(frames);
+    std::vector<int32_t> right(frames);
+    for (size_t i = 0; i < frames; ++i) {
+        left[i] = static_cast<int32_t>((i % 2000) - 1000);
+        right[i] = static_cast<int32_t>(1000 - (i % 2000));
+    }
+
+    LAC::Encoder encoder(12, 0, 44100, 16, false, false, false);
+    encoder.set_thread_count(2);
+    LAC::ThreadCollector collector;
+    const std::vector<uint8_t> bitstream = encoder.encode(left, right, &collector);
+    assert(!bitstream.empty());
+
+    const auto threads = collector.snapshot();
+    assert(!threads.empty());
+    assert(threads.size() <= 2);
+    std::cout << "thread limit tests ok\n";
+}
+
 void run_e2e_tests() {
     const char* files[] = {
         "16.44100.wav",
