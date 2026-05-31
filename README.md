@@ -84,6 +84,10 @@ ctest --test-dir build-tests --output-on-failure
 
 If the local `assets/` directory is present, the E2E tests also run the larger WAV fixtures in that directory. In clean checkouts and CI, the test suite falls back to generated WAV fixtures so the repository remains self-contained.
 
+## Contributing
+
+Contribution setup, review expectations, and local development commands are documented in [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Format
 
 The current `.lac` bitstream is documented in [docs/format.md](docs/format.md). The format is versioned internally as frame version `2`, but it is not yet frozen for external compatibility.
@@ -95,6 +99,7 @@ Malformed audio/container inputs are security-relevant because decoders and pars
 ## Maintainer Workflow
 
 Codec correctness, fuzzing readiness, security review, and release review are tracked in the [maintainer workflow](docs/maintainer-workflow.md).
+Release preparation uses the [release checklist](docs/release-checklist.md).
 
 ## Repository Hygiene
 

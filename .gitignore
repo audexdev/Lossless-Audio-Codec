@@ -2,6 +2,7 @@
 # Build artifacts
 # =========================
 build/
+build-*/
 build-release/
 build-tests/
 cmake-build*/
@@ -9,6 +10,7 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 Makefile
+compile_commands.json
 
 # =========================
 # Generated binaries
@@ -64,4 +66,3 @@ DerivedData/
 assets/
 .cache/
 .claude/
-
