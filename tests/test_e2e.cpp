@@ -222,6 +222,50 @@ void run_decoder_error_tests() {
     std::cout << "decoder error tests ok\n";
 }
 
+void run_encoder_validation_tests() {
+    const std::vector<int32_t> mono(16, 0);
+    const std::vector<int32_t> right(16, 0);
+    const std::vector<int32_t> short_right(8, 0);
+
+    auto expect_invalid = [](const char* label, LAC::Encoder& encoder,
+                             const std::vector<int32_t>& left,
+                             const std::vector<int32_t>& right_channel) {
+        bool threw = false;
+        try {
+            (void)encoder.encode(left, right_channel);
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        if (!threw) {
+            std::cerr << "[encoder-validation-miss] " << label << "\n";
+        }
+        assert(threw);
+    };
+
+    LAC::Encoder empty_input(12, 0, 44100, 16, false, false, false);
+    expect_invalid("empty input", empty_input, {}, {});
+
+    LAC::Encoder mismatched_channels(12, 0, 44100, 16, false, false, false);
+    expect_invalid("mismatched channels", mismatched_channels, mono, short_right);
+
+    LAC::Encoder bad_sample_rate(12, 0, 12345, 16, false, false, false);
+    expect_invalid("bad sample rate", bad_sample_rate, mono, {});
+
+    LAC::Encoder bad_bit_depth(12, 0, 44100, 20, false, false, false);
+    expect_invalid("bad bit depth", bad_bit_depth, mono, {});
+
+    LAC::Encoder bad_stereo_mode(12, 3, 44100, 16, false, false, false);
+    expect_invalid("bad stereo mode", bad_stereo_mode, mono, right);
+
+    LAC::Encoder out_of_range_16(12, 0, 44100, 16, false, false, false);
+    expect_invalid("out-of-range 16-bit sample", out_of_range_16, {32768}, {});
+
+    LAC::Encoder out_of_range_24(12, 0, 44100, 24, false, false, false);
+    expect_invalid("out-of-range 24-bit sample", out_of_range_24, {0x800000}, {});
+
+    std::cout << "encoder validation tests ok\n";
+}
+
 void run_e2e_tests() {
     const char* files[] = {
         "16.44100.wav",

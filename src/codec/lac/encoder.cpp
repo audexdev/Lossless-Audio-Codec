@@ -18,6 +18,10 @@ namespace {
   constexpr double kSlopePenaltyWeight = 0.25;
   constexpr double kSlopeThreshold = 4.0;
   constexpr uint64_t kMaxCostProxy = std::numeric_limits<uint64_t>::max() / 4;
+  constexpr int32_t kPcm16Min = -32768;
+  constexpr int32_t kPcm16Max = 32767;
+  constexpr int32_t kPcm24Min = -0x800000;
+  constexpr int32_t kPcm24Max = 0x7FFFFF;
 
   struct BlockInfo {
     size_t start;
@@ -40,6 +44,39 @@ namespace {
       }
     }
     return false;
+  }
+
+  bool is_supported_sample_rate(uint32_t sample_rate) {
+    return sample_rate == 44100 ||
+           sample_rate == 48000 ||
+           sample_rate == 96000 ||
+           sample_rate == 192000;
+  }
+
+  bool is_supported_bit_depth(uint8_t bit_depth) {
+    return bit_depth == 16 || bit_depth == 24;
+  }
+
+  bool is_valid_sample_for_depth(int32_t sample, uint8_t bit_depth) {
+    if (bit_depth == 16) {
+      return sample >= kPcm16Min && sample <= kPcm16Max;
+    }
+    if (bit_depth == 24) {
+      return sample >= kPcm24Min && sample <= kPcm24Max;
+    }
+    return false;
+  }
+
+  void validate_samples_for_depth(const std::vector<int32_t>& samples,
+                                  uint8_t bit_depth,
+                                  const char* channel) {
+    for (size_t i = 0; i < samples.size(); ++i) {
+      if (!is_valid_sample_for_depth(samples[i], bit_depth)) {
+        throw std::invalid_argument(
+            std::string(channel) + " sample at index " + std::to_string(i) +
+            " is outside the configured PCM bit depth");
+      }
+    }
   }
 
   bool should_enable_zero_run_for_block(const std::vector<int32_t>& pcm, int order) {
@@ -212,11 +249,27 @@ namespace LAC {
       const std::vector<int32_t>& right,
       ThreadCollector* collector
       ) {
+    if (left.empty()) {
+      throw std::invalid_argument("left channel must not be empty");
+    }
     if (!right.empty() && right.size() != left.size()) {
       throw std::invalid_argument(
           "right channel size (" + std::to_string(right.size()) +
           ") must match left channel size (" + std::to_string(left.size()) + ")"
           );
+    }
+    if (!is_supported_sample_rate(this->sample_rate)) {
+      throw std::invalid_argument("unsupported sample rate: " + std::to_string(this->sample_rate));
+    }
+    if (!is_supported_bit_depth(this->bit_depth)) {
+      throw std::invalid_argument("unsupported bit depth: " + std::to_string(this->bit_depth));
+    }
+    if (this->stereo_mode > 2) {
+      throw std::invalid_argument("unsupported stereo mode: " + std::to_string(this->stereo_mode));
+    }
+    validate_samples_for_depth(left, this->bit_depth, "left");
+    if (!right.empty()) {
+      validate_samples_for_depth(right, this->bit_depth, "right");
     }
 
     BitWriter writer;

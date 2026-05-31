@@ -17,6 +17,7 @@ void run_partitioning_tests();
 void run_predictor_tests();
 void run_e2e_tests();
 void run_decoder_error_tests();
+void run_encoder_validation_tests();
 
 namespace {
 
@@ -176,6 +177,7 @@ int main() {
     run_zerorun_tests();
     run_partitioning_tests();
     run_predictor_tests();
+    run_encoder_validation_tests();
     run_decoder_error_tests();
     run_e2e_tests();
     return 0;

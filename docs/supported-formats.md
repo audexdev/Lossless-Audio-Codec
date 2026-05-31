@@ -26,7 +26,9 @@ Decoded samples are represented internally as signed 32-bit integers, but the su
 | 16 | `-32768` | `32767` |
 | 24 | `-8388608` | `8388607` |
 
-The WAV writer currently clips samples to the target bit depth. Public encoder validation is still being hardened so out-of-domain API inputs are tracked separately from the supported WAV contract.
+The LAC encoder validates public input samples against the configured bit depth and rejects out-of-domain values. The WAV writer currently clips samples to the target bit depth when writing restored WAV files.
+
+Block-level codec headers under `src/codec/block/` are internal implementation surfaces. They are used by tests, but they are not a stable public API for arbitrary `int32_t` sample domains.
 
 ## LAC Container
 
