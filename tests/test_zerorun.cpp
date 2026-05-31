@@ -35,6 +35,121 @@ std::vector<int32_t> make_sparse_block(size_t size) {
     return out;
 }
 
+std::vector<int32_t> make_bin_fallback_block() {
+    std::vector<int32_t> pcm(64, 0);
+    for (size_t i = 0; i < pcm.size(); ++i) {
+        if (i % 8 == 0) {
+            pcm[i] = 1 << 23; // large spike to inflate k and force fallback tokens
+        } else if (i % 3 == 0) {
+            pcm[i] = 1;
+        } else if (i % 5 == 0) {
+            pcm[i] = -1;
+        }
+    }
+    return pcm;
+}
+
+uint32_t read_rice_unsigned(BitReader& reader, uint32_t k) {
+    uint32_t q = 0;
+    while (reader.read_bit() == 1u) {
+        ++q;
+        if (reader.has_error()) return 0;
+    }
+    const uint32_t remainder = (k > 0) ? reader.read_bits(static_cast<int>(k)) : 0u;
+    return (q << k) | remainder;
+}
+
+uint32_t zigzag_encode_local(int32_t v) {
+    return (static_cast<uint32_t>(v) << 1) ^ static_cast<uint32_t>(v >> 31);
+}
+
+int32_t zigzag_decode_local(uint32_t u) {
+    return static_cast<int32_t>((u >> 1) ^ -static_cast<int32_t>(u & 1u));
+}
+
+uint32_t adapt_k_stateless_local(uint64_t sum, uint32_t count) {
+    if (count == 0) return 0;
+    const uint64_t mean = (sum + (count >> 1)) / count;
+    uint32_t k = 0;
+    while ((1u << k) < mean && k < 31u) {
+        ++k;
+    }
+    return k;
+}
+
+std::vector<uint32_t> partition_sizes_for_block(uint32_t size, uint8_t order) {
+    if (order == 0) return {size};
+    const uint32_t count = 1u << order;
+    const uint32_t base = size >> order;
+    std::vector<uint32_t> parts(count, base);
+    parts.back() = size - base * (count - 1u);
+    return parts;
+}
+
+struct BinTokenSummary {
+    bool saw_bin_mode = false;
+    uint32_t fallback_tokens = 0;
+};
+
+BinTokenSummary inspect_bin_tokens(const std::vector<uint8_t>& buf, uint32_t block_size) {
+    BitReader br(buf);
+    const uint32_t predictor_type = br.read_bits(8);
+    const uint32_t order = br.read_bits(8);
+    if (predictor_type == 2u) {
+        br.read_bits(order * 16); // LPC coeffs
+    }
+
+    const uint32_t control = br.read_bits(8);
+    const uint8_t partition_order = ((control & Block::PARTITION_FLAG) != 0u)
+        ? static_cast<uint8_t>((control & Block::PARTITION_ORDER_MASK) >> Block::PARTITION_ORDER_SHIFT)
+        : 0u;
+    const uint32_t partition_count = (partition_order == 0) ? 1u : (1u << partition_order);
+    const bool stateless = partition_order > 0;
+
+    std::vector<uint8_t> modes(partition_count);
+    std::vector<uint32_t> initial_k(partition_count);
+    for (uint32_t i = 0; i < partition_count; ++i) {
+        modes[i] = static_cast<uint8_t>(br.read_bits(2));
+        initial_k[i] = br.read_bits(5);
+    }
+
+    BinTokenSummary summary;
+    const auto part_sizes = partition_sizes_for_block(block_size, partition_order);
+    for (uint32_t part = 0; part < partition_count; ++part) {
+        if (modes[part] != 2u) {
+            continue;
+        }
+        summary.saw_bin_mode = true;
+        uint32_t current_k = initial_k[part];
+        uint64_t sum_u = 0;
+        uint32_t count = 0;
+        Rice::AdaptState adapt_state;
+
+        for (uint32_t i = 0; i < part_sizes[part]; ++i) {
+            const uint32_t tag = br.read_bits(2);
+            int32_t value = 0;
+            if (tag == 0u) {
+                value = 0;
+            } else if (tag == 1u) {
+                value = (br.read_bit() == 0u) ? 1 : -1;
+            } else if (tag == 2u) {
+                value = (br.read_bit() == 0u) ? 2 : -2;
+            } else {
+                ++summary.fallback_tokens;
+                value = zigzag_decode_local(read_rice_unsigned(br, current_k));
+            }
+            assert(!br.has_error());
+
+            sum_u += zigzag_encode_local(value);
+            ++count;
+            current_k = stateless
+                ? adapt_k_stateless_local(sum_u, count)
+                : Rice::adapt_k(sum_u, count, adapt_state);
+        }
+    }
+    return summary;
+}
+
 void roundtrip_block(const std::vector<int32_t>& pcm, bool enable_zr) {
     Block::Encoder enc(8);
     enc.set_zero_run_enabled(enable_zr);
@@ -203,47 +318,14 @@ void roundtrip_block(const std::vector<int32_t>& pcm, bool enable_zr) {
 }
 
 void test_bin_small_block() {
-    std::vector<int32_t> pcm(64, 0);
-    for (size_t i = 0; i < pcm.size(); ++i) {
-        if (i % 8 == 0) {
-            pcm[i] = 1 << 23; // large spike to inflate k
-        } else if (i % 3 == 0) {
-            pcm[i] = 1;
-        } else if (i % 5 == 0) {
-            pcm[i] = -1;
-        }
-    }
+    std::vector<int32_t> pcm = make_bin_fallback_block();
     Block::Encoder enc(8);
     enc.set_zero_run_enabled(false);
     enc.set_partitioning_enabled(false);
     std::vector<uint8_t> buf = enc.encode(pcm);
     assert(!buf.empty());
-    bool saw_bin_mode = false;
-    {
-        BitReader header(buf);
-        uint32_t predictor_type = header.read_bits(8);
-        uint32_t order = header.read_bits(8);
-        if (predictor_type == 2u) {
-            header.read_bits(order * 16); // LPC coeffs
-        }
-        uint32_t control = header.read_bits(8);
-        uint8_t partition_order = ((control & Block::PARTITION_FLAG) != 0u)
-            ? static_cast<uint8_t>((control & Block::PARTITION_ORDER_MASK) >> Block::PARTITION_ORDER_SHIFT)
-            : 0u;
-        if (partition_order == 0) {
-            uint32_t mode = control >> 5;
-            saw_bin_mode = (mode == 2u);
-            header.read_bits(5); // initial k
-        } else {
-            uint32_t part_count = 1u << partition_order;
-            for (uint32_t i = 0; i < part_count; ++i) {
-                uint32_t mode = header.read_bits(2);
-                header.read_bits(5); // k
-                if (mode == 2u) saw_bin_mode = true;
-            }
-        }
-    }
-    assert(saw_bin_mode);
+    const BinTokenSummary summary = inspect_bin_tokens(buf, static_cast<uint32_t>(pcm.size()));
+    assert(summary.saw_bin_mode);
 
     BitReader br(buf);
     Block::Decoder dec;
@@ -254,11 +336,15 @@ void test_bin_small_block() {
 }
 
 void test_bin_fallback_values() {
-    std::vector<int32_t> pcm = {0, 3, -4, 1, -1, 2, -2, 7, -8, 0, 0, 5};
+    std::vector<int32_t> pcm = make_bin_fallback_block();
     Block::Encoder enc(8);
     enc.set_zero_run_enabled(false);
+    enc.set_partitioning_enabled(false);
     std::vector<uint8_t> buf = enc.encode(pcm);
     assert(!buf.empty());
+    const BinTokenSummary summary = inspect_bin_tokens(buf, static_cast<uint32_t>(pcm.size()));
+    assert(summary.saw_bin_mode);
+    assert(summary.fallback_tokens > 0);
 
     BitReader br(buf);
     Block::Decoder dec;

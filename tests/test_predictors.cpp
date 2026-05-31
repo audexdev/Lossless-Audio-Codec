@@ -44,17 +44,13 @@ std::vector<int32_t> make_noise(size_t n) {
     return out;
 }
 
-void assert_roundtrip(const std::vector<int32_t>& pcm, const std::vector<uint8_t>& expected) {
+void assert_roundtrip(const std::vector<int32_t>& pcm, uint8_t expected_predictor) {
     Block::Encoder enc(12);
     enc.set_partitioning_enabled(false);
     enc.set_zero_run_enabled(false);
     std::vector<uint8_t> buf = enc.encode(pcm);
     uint8_t predictor = read_predictor_type(buf);
-    bool ok_type = false;
-    for (uint8_t e : expected) {
-        if (predictor == e) ok_type = true;
-    }
-    assert(ok_type);
+    assert(predictor == expected_predictor);
 
     BitReader br(buf);
     Block::Decoder dec;
@@ -66,8 +62,8 @@ void assert_roundtrip(const std::vector<int32_t>& pcm, const std::vector<uint8_t
 } // namespace
 
 void run_predictor_tests() {
-    assert_roundtrip(make_ramp(128), {0, 2});           // fixed or LPC
-    assert_roundtrip(make_fir_sequence(256), {1, 2});   // FIR or LPC
-    assert_roundtrip(make_noise(256), {2});             // LPC preferred
+    assert_roundtrip(make_ramp(128), 0);          // fixed predictor
+    assert_roundtrip(make_fir_sequence(256), 1);  // FIR predictor
+    assert_roundtrip(make_noise(256), 2);         // LPC predictor
     std::cout << "predictor selection tests ok\n";
 }

@@ -1,13 +1,19 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-cd "$(dirname "$0")/build-release"
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUILD_DIR="${BUILD_DIR:-"$ROOT_DIR/build-release"}"
+ASSETS_DIR="${LAC_ASSETS_DIR:-"$ROOT_DIR/assets"}"
+CLI="${LAC_CLI:-"$BUILD_DIR/lac_cli"}"
 
-if command -v gdate >/dev/null 2>&1; then
-    DATE_CMD="gdate"
-else
-    DATE_CMD="date"
+if [[ ! -x "$CLI" ]]; then
+    echo "lac_cli not found or not executable: $CLI" >&2
+    echo "Build first or set BUILD_DIR=/path/to/build." >&2
+    exit 1
 fi
+
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/lac_roundtrip.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT
 
 measure() {
     label="$1"
@@ -15,37 +21,44 @@ measure() {
 
     echo ">>> $label"
 
-    start_ms=$($DATE_CMD +%s%3N)
+    start_s=$(date +%s)
     "$@"
-    end_ms=$($DATE_CMD +%s%3N)
+    end_s=$(date +%s)
 
-    elapsed_ms=$((end_ms - start_ms))
-    echo "  time=${elapsed_ms}ms"
+    elapsed_s=$((end_s - start_s))
+    echo "  time=${elapsed_s}s"
     echo ""
 }
 
-# Encode
-measure "encode 16.44100.wav" ./lac_cli encode ../assets/16.44100.wav 16.44100.lac
+roundtrip() {
+    filename="$1"
+    src="$ASSETS_DIR/$filename"
+    lac="$TMP_DIR/${filename%.wav}.lac"
+    restored="$TMP_DIR/r_$filename"
 
-measure "encode 24.44100.wav" ./lac_cli encode ../assets/24.44100.wav 24.44100.lac
+    if [[ ! -f "$src" ]]; then
+        echo "missing fixture: $src" >&2
+        exit 1
+    fi
 
-measure "encode 24.48000.wav" ./lac_cli encode ../assets/24.48000.wav 24.48000.lac
+    measure "encode $filename" "$CLI" encode "$src" "$lac"
+    measure "decode ${filename%.wav}.lac" "$CLI" decode "$lac" "$restored"
 
-measure "encode 24.96000.wav" ./lac_cli encode ../assets/24.96000.wav 24.96000.lac
+    if ! cmp -s "$src" "$restored"; then
+        echo "roundtrip mismatch: $filename" >&2
+        exit 1
+    fi
 
-measure "encode 24.192000.wav" ./lac_cli encode ../assets/24.192000.wav 24.192000.lac
+    echo "  verified=$filename"
+    echo ""
+}
 
-# Decode
-measure "decode 16.44100.lac" ./lac_cli decode 16.44100.lac r_16.44100.wav
-
-measure "decode 24.44100.lac" ./lac_cli decode 24.44100.lac r_24.44100.wav
-
-measure "decode 24.48000.lac" ./lac_cli decode 24.48000.lac r_24.48000.wav
-
-measure "decode 24.96000.lac" ./lac_cli decode 24.96000.lac r_24.96000.wav
-
-measure "decode 24.192000.lac" ./lac_cli decode 24.192000.lac r_24.192000.wav
+roundtrip "16.44100.wav"
+roundtrip "24.44100.wav"
+roundtrip "24.48000.wav"
+roundtrip "24.96000.wav"
+roundtrip "24.192000.wav"
 
 echo "--------------------------------------"
-echo " All encode/decode operations complete "
+echo " All encode/decode roundtrips verified "
 echo "--------------------------------------"
