@@ -92,6 +92,10 @@ The current `.lac` bitstream is documented in [docs/format.md](docs/format.md). 
 
 Malformed audio/container inputs are security-relevant because decoders and parsers handle attacker-controlled sizes and bitstreams. Please read [SECURITY.md](SECURITY.md) before reporting crashes, hangs, or memory safety issues.
 
+## Maintainer Workflow
+
+Codec correctness, fuzzing readiness, security review, and release review are tracked in the [maintainer workflow](docs/maintainer-workflow.md).
+
 ## Repository Hygiene
 
 Generated build directories, local audio fixtures, editor state, and large temporary outputs are intentionally ignored. The source tree is designed to build from tracked files alone.
