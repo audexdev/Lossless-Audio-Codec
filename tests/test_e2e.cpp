@@ -36,6 +36,23 @@ bool load_wav_file(const std::filesystem::path& path, WavData& out) {
     return read_wav(path.string(), out.left, out.right, out.channels, out.sample_rate, out.bit_depth);
 }
 
+std::vector<uint8_t> load_binary_file(const std::filesystem::path& path) {
+    std::ifstream f(path, std::ios::binary);
+    assert(f.good() && "Failed to open binary file");
+
+    f.seekg(0, std::ios::end);
+    const std::streampos end = f.tellg();
+    assert(end >= 0 && "Failed to determine binary file size");
+
+    std::vector<uint8_t> data(static_cast<size_t>(end));
+    f.seekg(0, std::ios::beg);
+    if (!data.empty()) {
+        f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()));
+        assert(f.good() && "Failed to read binary file");
+    }
+    return data;
+}
+
 std::filesystem::path write_temp_path(const std::string& ext) {
     static uint64_t counter = 0;
     auto base = std::filesystem::temp_directory_path() / ("lac_test_" + std::to_string(++counter) + ext);
@@ -82,13 +99,17 @@ void run_case_path(const std::filesystem::path& src_path, const std::string& lab
         std::ofstream f(lac_path, std::ios::binary);
         assert(f.good());
         f.write(reinterpret_cast<const char*>(bitstream.data()), static_cast<std::streamsize>(bitstream.size()));
+        assert(f.good() && "Failed to write temporary LAC file");
     }
+
+    std::vector<uint8_t> encoded_file = load_binary_file(lac_path);
+    assert(encoded_file == bitstream && "Temporary LAC file bytes differ from encoder output");
 
     LAC::Decoder decoder;
     std::vector<int32_t> dec_left, dec_right;
     FrameHeader hdr;
     try {
-        decoder.decode(bitstream.data(), bitstream.size(), dec_left, dec_right, &hdr);
+        decoder.decode(encoded_file.data(), encoded_file.size(), dec_left, dec_right, &hdr);
     } catch (const std::runtime_error& e) {
         std::cerr << "[e2e-decode-error] file=" << label << " error=" << e.what() << "\n";
         assert(false && "Decode failed");
