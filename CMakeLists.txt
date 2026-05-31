@@ -6,6 +6,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(LAC_BUILD_TESTS "Build LAC tests" OFF)
+set(LAC_TEST_ASSETS_DIR "${PROJECT_SOURCE_DIR}/assets" CACHE PATH "Optional directory containing WAV fixtures for LAC tests")
+
+find_package(Threads REQUIRED)
 
 add_library(lac STATIC
     src/codec/bitstream/bit_reader.cpp
@@ -43,6 +46,7 @@ target_include_directories(lac PUBLIC
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/src
 )
+target_link_libraries(lac PUBLIC Threads::Threads)
 
 add_executable(lac_cli
     src/main.cpp
@@ -60,6 +64,6 @@ if(LAC_BUILD_TESTS)
         tests/test_zerorun.cpp
     )
     target_link_libraries(lac_tests PRIVATE lac)
-    target_compile_definitions(lac_tests PRIVATE LAC_ASSETS_DIR="${PROJECT_SOURCE_DIR}/assets")
+    target_compile_definitions(lac_tests PRIVATE LAC_ASSETS_DIR="${LAC_TEST_ASSETS_DIR}")
     add_test(NAME lac_tests COMMAND lac_tests)
 endif()

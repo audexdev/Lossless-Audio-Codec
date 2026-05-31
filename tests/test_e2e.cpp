@@ -3,6 +3,7 @@
 #include "io/wav_io.hpp"
 #include "codec/frame/frame_header.hpp"
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <filesystem>
@@ -66,9 +67,8 @@ CompareResult compare_pcm(const std::vector<int32_t>& a, const std::vector<int32
     return res;
 }
 
-void run_case(const std::string& filename) {
-    const auto src_path = assets_dir() / filename;
-    std::cout << "[e2e] start " << filename << "\n";
+void run_case_path(const std::filesystem::path& src_path, const std::string& label) {
+    std::cout << "[e2e] start " << label << "\n";
     WavData orig;
     bool ok = load_wav_file(src_path, orig);
     assert(ok && "Failed to load source WAV");
@@ -90,7 +90,7 @@ void run_case(const std::string& filename) {
     try {
         decoder.decode(bitstream.data(), bitstream.size(), dec_left, dec_right, &hdr);
     } catch (const std::runtime_error& e) {
-        std::cerr << "[e2e-decode-error] file=" << filename << " error=" << e.what() << "\n";
+        std::cerr << "[e2e-decode-error] file=" << label << " error=" << e.what() << "\n";
         assert(false && "Decode failed");
     }
 
@@ -111,7 +111,7 @@ void run_case(const std::string& filename) {
     CompareResult left_cmp = compare_pcm(orig.left, restored.left);
     CompareResult right_cmp = compare_pcm(orig.right, restored.right);
     if (!left_cmp.equal || !right_cmp.equal) {
-        std::cerr << "[e2e-mismatch] file=" << filename
+        std::cerr << "[e2e-mismatch] file=" << label
                   << " left_mis=" << left_cmp.mismatches << " left_maxdiff=" << left_cmp.max_abs_diff
                   << " right_mis=" << right_cmp.mismatches << " right_maxdiff=" << right_cmp.max_abs_diff
                   << "\n";
@@ -121,7 +121,47 @@ void run_case(const std::string& filename) {
     std::error_code ec;
     std::filesystem::remove(lac_path, ec);
     std::filesystem::remove(out_wav_path, ec);
-    std::cout << "[e2e] ok " << filename << "\n";
+    std::cout << "[e2e] ok " << label << "\n";
+}
+
+void run_case(const std::string& filename) {
+    run_case_path(assets_dir() / filename, filename);
+}
+
+std::filesystem::path write_generated_wav(const std::string& label,
+                                          uint16_t channels,
+                                          uint32_t sample_rate,
+                                          uint8_t bit_depth,
+                                          size_t frames) {
+    std::vector<int32_t> left(frames);
+    std::vector<int32_t> right;
+    if (channels == 2) right.resize(frames);
+
+    const int32_t amplitude = (bit_depth == 24) ? 0x300000 : 12000;
+    for (size_t i = 0; i < frames; ++i) {
+        const double t = static_cast<double>(i) / static_cast<double>(sample_rate);
+        left[i] = static_cast<int32_t>(std::sin(2.0 * 3.14159265358979323846 * 440.0 * t) * amplitude);
+        if (channels == 2) {
+            right[i] = static_cast<int32_t>(std::sin(2.0 * 3.14159265358979323846 * 661.0 * t) * (amplitude / 2));
+        }
+    }
+
+    const auto wav_path = write_temp_path("_" + label + ".wav");
+    const bool ok = write_wav(wav_path.string(), left, right, channels, sample_rate, bit_depth);
+    assert(ok && "Failed to write generated WAV fixture");
+    return wav_path;
+}
+
+void run_generated_cases() {
+    const auto mono_path = write_generated_wav("generated_mono_16_44100", 1, 44100, 16, 4096);
+    const auto stereo_path = write_generated_wav("generated_stereo_24_48000", 2, 48000, 24, 4096);
+
+    run_case_path(mono_path, "generated_mono_16_44100.wav");
+    run_case_path(stereo_path, "generated_stereo_24_48000.wav");
+
+    std::error_code ec;
+    std::filesystem::remove(mono_path, ec);
+    std::filesystem::remove(stereo_path, ec);
 }
 
 } // namespace
@@ -169,8 +209,18 @@ void run_e2e_tests() {
         "24.96000.wav",
         "24.192000.wav"
     };
+    bool ran_asset_case = false;
     for (const char* f : files) {
+        if (!std::filesystem::exists(assets_dir() / f)) {
+            std::cout << "[e2e] skip missing asset " << f << "\n";
+            continue;
+        }
         run_case(f);
+        ran_asset_case = true;
     }
+    if (!ran_asset_case) {
+        std::cout << "[e2e] no asset fixtures found; running generated fixtures\n";
+    }
+    run_generated_cases();
     std::cout << "e2e wav->lac->wav tests ok\n";
 }
