@@ -10,10 +10,49 @@
 #include <limits>
 #include <optional>
 #include <sstream>
+#include <utility>
 
 namespace Block {
 
 Decoder::Decoder() {}
+
+template <size_t... I>
+int64_t lpc_accumulate_known_order(const int32_t* pcm,
+                                   size_t n,
+                                   const std::array<int16_t, 33>& coeffs,
+                                   std::index_sequence<I...>) {
+    int64_t acc = 0;
+    ((acc += static_cast<int64_t>(coeffs[I + 1]) *
+             static_cast<int64_t>(pcm[n - (I + 1)])), ...);
+    return acc;
+}
+
+template <int Order>
+bool restore_lpc_known_order_in_place(int32_t* pcm,
+                                      size_t size,
+                                      const std::array<int16_t, 33>& coeffs,
+                                      int64_t lo,
+                                      int64_t hi) {
+    const size_t warmup = std::min(size, static_cast<size_t>(Order));
+    for (size_t n = 0; n < warmup; ++n) {
+        int64_t acc = 0;
+        for (int i = 1; i <= static_cast<int>(n); ++i) {
+            acc += static_cast<int64_t>(coeffs[i]) *
+                   static_cast<int64_t>(pcm[n - static_cast<size_t>(i)]);
+        }
+        const int64_t sample = (acc >> 15) + static_cast<int64_t>(pcm[n]);
+        if (sample < lo || sample > hi) return false;
+        pcm[n] = static_cast<int32_t>(sample);
+    }
+    for (size_t n = warmup; n < size; ++n) {
+        const int64_t acc =
+            lpc_accumulate_known_order(pcm, n, coeffs, std::make_index_sequence<Order>{});
+        const int64_t sample = (acc >> 15) + static_cast<int64_t>(pcm[n]);
+        if (sample < lo || sample > hi) return false;
+        pcm[n] = static_cast<int32_t>(sample);
+    }
+    return true;
+}
 
 bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& out) {
     std::vector<int32_t> pcm(block_size);
@@ -267,36 +306,39 @@ bool Decoder::decode_into(BitReader& br, uint32_t block_size, int32_t* out) {
     };
 
     auto restore_fixed_in_place = [&](int32_t* pcm, size_t size, int order) -> bool {
-        if (order == 0) {
+        auto restore_with_prediction = [&](auto predict, size_t start) -> bool {
+            for (size_t i = start; i < size; ++i) {
+                const int64_t sample = static_cast<int64_t>(pcm[i]) + predict(i);
+                if (sample < std::numeric_limits<int32_t>::min() ||
+                    sample > std::numeric_limits<int32_t>::max()) {
+                    return false;
+                }
+                pcm[i] = static_cast<int32_t>(sample);
+            }
             return true;
-        }
-        for (size_t i = static_cast<size_t>(order); i < size; ++i) {
-            int64_t pred = 0;
-            switch (order) {
-                case 1:
-                    pred = pcm[i - 1];
-                    break;
-                case 2:
-                    pred = 2LL * pcm[i - 1] - pcm[i - 2];
-                    break;
-                case 3:
-                    pred = 3LL * pcm[i - 1] - 3LL * pcm[i - 2] + pcm[i - 3];
-                    break;
-                case 4:
-                    pred = 4LL * pcm[i - 1] - 6LL * pcm[i - 2] + 4LL * pcm[i - 3] - pcm[i - 4];
-                    break;
-                default:
-                    pred = 0;
-                    break;
-            }
-            const int64_t sample = static_cast<int64_t>(pcm[i]) + pred;
-            if (sample < std::numeric_limits<int32_t>::min() ||
-                sample > std::numeric_limits<int32_t>::max()) {
+        };
+        switch (order) {
+            case 0:
+                return true;
+            case 1:
+                return restore_with_prediction([&](size_t i) {
+                    return static_cast<int64_t>(pcm[i - 1]);
+                }, 1);
+            case 2:
+                return restore_with_prediction([&](size_t i) {
+                    return 2LL * pcm[i - 1] - pcm[i - 2];
+                }, 2);
+            case 3:
+                return restore_with_prediction([&](size_t i) {
+                    return 3LL * pcm[i - 1] - 3LL * pcm[i - 2] + pcm[i - 3];
+                }, 3);
+            case 4:
+                return restore_with_prediction([&](size_t i) {
+                    return 4LL * pcm[i - 1] - 6LL * pcm[i - 2] + 4LL * pcm[i - 3] - pcm[i - 4];
+                }, 4);
+            default:
                 return false;
-            }
-            pcm[i] = static_cast<int32_t>(sample);
         }
-        return true;
     };
 
     auto restore_fir_in_place = [&](int32_t* pcm, size_t size, int taps) -> bool {
@@ -322,6 +364,20 @@ bool Decoder::decode_into(BitReader& br, uint32_t block_size, int32_t* out) {
         const int coeff_order = std::max(0, lpc_order);
         const int64_t lo = static_cast<int64_t>(std::numeric_limits<int32_t>::min());
         const int64_t hi = static_cast<int64_t>(std::numeric_limits<int32_t>::max());
+        switch (coeff_order) {
+            case 4:
+                return restore_lpc_known_order_in_place<4>(pcm, size, coeffs, lo, hi);
+            case 6:
+                return restore_lpc_known_order_in_place<6>(pcm, size, coeffs, lo, hi);
+            case 8:
+                return restore_lpc_known_order_in_place<8>(pcm, size, coeffs, lo, hi);
+            case 10:
+                return restore_lpc_known_order_in_place<10>(pcm, size, coeffs, lo, hi);
+            case 12:
+                return restore_lpc_known_order_in_place<12>(pcm, size, coeffs, lo, hi);
+            default:
+                break;
+        }
         const size_t warmup = std::min(size, static_cast<size_t>(coeff_order));
         for (size_t n = 0; n < warmup; ++n) {
             int64_t acc = 0;
