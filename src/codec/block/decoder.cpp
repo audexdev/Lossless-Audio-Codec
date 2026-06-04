@@ -5,6 +5,7 @@
 #include "codec/rice/rice.hpp"
 #include "utils/logger.hpp"
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <limits>
 #include <optional>
@@ -54,22 +55,10 @@ bool Decoder::decode_into(BitReader& br, uint32_t block_size, int32_t* out) {
         return std::min<uint32_t>(31u, std::bit_width(mean - uint64_t{1}));
     };
 
-    auto partition_sizes_for_block = [](uint32_t size, uint8_t order) -> std::vector<uint32_t> {
-        std::vector<uint32_t> parts;
-        if (order == 0) {
-            parts.push_back(size);
-            return parts;
-        }
+    auto partition_size_at = [](uint32_t size, uint8_t order, uint32_t index, uint32_t count) -> uint32_t {
+        if (order == 0) return size;
         const uint32_t base = size >> order;
-        if (base == 0) {
-            parts.push_back(size);
-            return parts;
-        }
-        const uint32_t count = 1u << order;
-        parts.assign(count, base);
-        const uint32_t used = base * (count - 1u);
-        parts.back() = size - used;
-        return parts;
+        return (index + 1u == count) ? (size - base * (count - 1u)) : base;
     };
 
     auto decode_residual_segment = [&](BitReader& reader,
@@ -319,9 +308,8 @@ bool Decoder::decode_into(BitReader& br, uint32_t block_size, int32_t* out) {
     auto restore_lpc_in_place = [&](int32_t* pcm,
                                     size_t size,
                                     int lpc_order,
-                                    const std::vector<int16_t>& coeffs) -> bool {
-        const int coeff_order = std::max(0,
-            std::min(lpc_order, static_cast<int>(coeffs.size()) - 1));
+                                    const std::array<int16_t, 33>& coeffs) -> bool {
+        const int coeff_order = std::max(0, lpc_order);
         const int64_t lo = static_cast<int64_t>(std::numeric_limits<int32_t>::min());
         const int64_t hi = static_cast<int64_t>(std::numeric_limits<int32_t>::max());
         const size_t warmup = std::min(size, static_cast<size_t>(coeff_order));
@@ -362,9 +350,8 @@ bool Decoder::decode_into(BitReader& br, uint32_t block_size, int32_t* out) {
         if (order < 0 || order > 4) return false;
     }
 
-    std::vector<int16_t> coeffs_q15;
+    std::array<int16_t, 33> coeffs_q15{};
     if (predictor_type == 2) {
-        coeffs_q15.assign(order + 1, 0);
         for (int i = 1; i <= order; ++i) {
             coeffs_q15[i] = int16_t(br.read_bits(16));
             if (br.has_error()) return false;
@@ -385,11 +372,14 @@ bool Decoder::decode_into(BitReader& br, uint32_t block_size, int32_t* out) {
     if ((partition_order > 0) && ((block_size >> partition_order) < Block::MIN_PARTITION_SIZE)) return false;
 
     const uint32_t partition_count = (partition_order == 0) ? 1u : (1u << partition_order);
-    const auto part_sizes = partition_sizes_for_block(block_size, partition_order);
-    if (part_sizes.size() != partition_count || part_sizes.back() == 0) return false;
+    constexpr size_t kMaxPartitionCount = size_t{1} << Block::MAX_PARTITION_ORDER;
+    if (partition_count > kMaxPartitionCount ||
+        partition_size_at(block_size, partition_order, partition_count - 1u, partition_count) == 0) {
+        return false;
+    }
 
-    std::vector<uint8_t> part_modes(partition_count);
-    std::vector<uint32_t> part_k(partition_count);
+    std::array<uint8_t, kMaxPartitionCount> part_modes{};
+    std::array<uint32_t, kMaxPartitionCount> part_k{};
     for (uint32_t i = 0; i < partition_count; ++i) {
         part_modes[i] = static_cast<uint8_t>(br.read_bits(2));
         part_k[i] = br.read_bits(5);
@@ -411,7 +401,8 @@ bool Decoder::decode_into(BitReader& br, uint32_t block_size, int32_t* out) {
         std::ostringstream oss;
         oss << "[part-decode] modes/k:";
         for (uint32_t i = 0; i < partition_count; ++i) {
-            oss << " (" << static_cast<int>(part_modes[i]) << "," << part_k[i] << "," << part_sizes[i] << ")";
+            const uint32_t len = partition_size_at(block_size, partition_order, i, partition_count);
+            oss << " (" << static_cast<int>(part_modes[i]) << "," << part_k[i] << "," << len << ")";
         }
         oss << " bits_before_parts=" << br.bits_remaining() << "\n";
         LAC_DEBUG_LOG(oss.str());
@@ -420,20 +411,21 @@ bool Decoder::decode_into(BitReader& br, uint32_t block_size, int32_t* out) {
     const bool stateless = (partition_order > 0);
     size_t offset = 0;
     for (uint32_t i = 0; i < partition_count; ++i) {
+        const uint32_t part_size = partition_size_at(block_size, partition_order, i, partition_count);
         size_t bits_before = br.bits_remaining();
         if (debug_part) {
             LAC_DEBUG_LOG("[part-entry] idx=" << i
                           << " mode=" << static_cast<int>(part_modes[i])
                           << " k=" << part_k[i]
-                          << " samples=" << part_sizes[i]
+                          << " samples=" << part_size
                           << " bits_before=" << bits_before
                           << "\n");
         }
-        if (!decode_residual_segment(br, part_sizes[i], part_k[i], part_modes[i], out, offset, stateless)) {
+        if (!decode_residual_segment(br, part_size, part_k[i], part_modes[i], out, offset, stateless)) {
             if (debug_part) {
                 LAC_DEBUG_LOG("[part-fail] idx=" << i
                               << " consumed=" << (bits_before - br.bits_remaining())
-                              << " size=" << part_sizes[i]
+                              << " size=" << part_size
                               << " k=" << part_k[i]
                               << " mode=" << static_cast<int>(part_modes[i])
                               << " bits_left=" << br.bits_remaining()
@@ -447,7 +439,7 @@ bool Decoder::decode_into(BitReader& br, uint32_t block_size, int32_t* out) {
                           << " bits_consumed=" << (bits_before - part_end_bit)
                           << " bits_left=" << part_end_bit << "\n");
         }
-        offset += part_sizes[i];
+        offset += part_size;
     }
     if (offset != block_size) return false;
 

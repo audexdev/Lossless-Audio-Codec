@@ -367,7 +367,7 @@ int main(int argc, char** argv) {
       }
       StagedOutputFile staged_output(out_path);
       if (!staged_output.is_ready() ||
-          !write_wav(staged_output.path(), left, right, hdr.channels, hdr.sample_rate, hdr.bit_depth) ||
+          !write_wav_unchecked_samples(staged_output.path(), left, right, hdr.channels, hdr.sample_rate, hdr.bit_depth) ||
           !staged_output.publish(in_path)) {
         std::cerr << "Failed to write WAV: " << out_path << "\n";
         return 1;

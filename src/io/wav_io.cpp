@@ -1,6 +1,8 @@
 #include "wav_io.hpp"
+#include <algorithm>
 #include <fstream>
 #include <limits>
+#include <vector>
 
 namespace {
 
@@ -97,6 +99,62 @@ void write_pcm24_sample(std::ofstream& f, int32_t v) {
         static_cast<uint8_t>((v >> 16) & 0xFF)
     };
     f.write(reinterpret_cast<const char*>(b), 3);
+}
+
+void append_pcm16_sample(uint8_t*& out, int32_t v) {
+    *out++ = static_cast<uint8_t>(v & 0xFF);
+    *out++ = static_cast<uint8_t>((v >> 8) & 0xFF);
+}
+
+void append_pcm24_sample(uint8_t*& out, int32_t v) {
+    *out++ = static_cast<uint8_t>(v & 0xFF);
+    *out++ = static_cast<uint8_t>((v >> 8) & 0xFF);
+    *out++ = static_cast<uint8_t>((v >> 16) & 0xFF);
+}
+
+bool write_pcm_data(std::ofstream& f,
+                    const std::vector<int32_t>& left,
+                    const std::vector<int32_t>& right,
+                    uint16_t channels,
+                    uint8_t bit_depth,
+                    uint32_t frames,
+                    uint32_t block_align) {
+    constexpr size_t kChunkBytes = 4u * 1024u * 1024u;
+    const size_t frames_per_chunk = std::max<size_t>(1u, kChunkBytes / block_align);
+    std::vector<uint8_t> buffer(frames_per_chunk * block_align);
+
+    for (size_t base = 0; base < frames; base += frames_per_chunk) {
+        const size_t count = std::min<size_t>(frames_per_chunk, frames - base);
+        uint8_t* out = buffer.data();
+
+        if (bit_depth == 16) {
+            if (channels == 1) {
+                for (size_t i = 0; i < count; ++i) {
+                    append_pcm16_sample(out, left[base + i]);
+                }
+            } else {
+                for (size_t i = 0; i < count; ++i) {
+                    append_pcm16_sample(out, left[base + i]);
+                    append_pcm16_sample(out, right[base + i]);
+                }
+            }
+        } else {
+            if (channels == 1) {
+                for (size_t i = 0; i < count; ++i) {
+                    append_pcm24_sample(out, left[base + i]);
+                }
+            } else {
+                for (size_t i = 0; i < count; ++i) {
+                    append_pcm24_sample(out, left[base + i]);
+                    append_pcm24_sample(out, right[base + i]);
+                }
+            }
+        }
+
+        f.write(reinterpret_cast<const char*>(buffer.data()), out - buffer.data());
+        if (!f) return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -219,23 +277,28 @@ bool read_wav(const std::string& path,
     return true;
 }
 
-bool write_wav(const std::string& path,
-               const std::vector<int32_t>& left,
-               const std::vector<int32_t>& right,
-               uint16_t channels,
-               uint32_t sample_rate,
-               uint8_t bit_depth) {
+namespace {
+
+bool write_wav_impl(const std::string& path,
+                    const std::vector<int32_t>& left,
+                    const std::vector<int32_t>& right,
+                    uint16_t channels,
+                    uint32_t sample_rate,
+                    uint8_t bit_depth,
+                    bool validate_samples) {
     if (channels != 1 && channels != 2) return false;
     if (!is_supported_sample_rate(sample_rate)) return false;
     if (bit_depth != 16 && bit_depth != 24) return false;
     if (left.empty()) return false;
     if (channels == 1 && !right.empty()) return false;
     if (channels == 2 && left.size() != right.size()) return false;
-    for (int32_t sample : left) {
-        if (!is_valid_sample_for_depth(sample, bit_depth)) return false;
-    }
-    for (int32_t sample : right) {
-        if (!is_valid_sample_for_depth(sample, bit_depth)) return false;
+    if (validate_samples) {
+        for (int32_t sample : left) {
+            if (!is_valid_sample_for_depth(sample, bit_depth)) return false;
+        }
+        for (int32_t sample : right) {
+            if (!is_valid_sample_for_depth(sample, bit_depth)) return false;
+        }
     }
 
     uint16_t bytes_per_sample = static_cast<uint16_t>(bit_depth / 8);
@@ -248,7 +311,10 @@ bool write_wav(const std::string& path,
     const uint32_t data_size = static_cast<uint32_t>(data_size_u64);
     const uint32_t riff_size = static_cast<uint32_t>(riff_size_u64);
 
-    std::ofstream f(path, std::ios::binary);
+    std::ofstream f;
+    std::vector<char> file_buffer(4u * 1024u * 1024u);
+    f.rdbuf()->pubsetbuf(file_buffer.data(), static_cast<std::streamsize>(file_buffer.size()));
+    f.open(path, std::ios::binary);
     if (!f) return false;
 
     f.write("RIFF", 4);
@@ -267,21 +333,7 @@ bool write_wav(const std::string& path,
     f.write("data", 4);
     write_u32_le(f, data_size);
 
-    for (uint32_t i = 0; i < frames; ++i) {
-        if (bit_depth == 16) {
-            write_pcm16_sample(f, left[i]);
-        } else {
-            write_pcm24_sample(f, left[i]);
-        }
-
-        if (channels == 2) {
-            if (bit_depth == 16) {
-                write_pcm16_sample(f, right[i]);
-            } else {
-                write_pcm24_sample(f, right[i]);
-            }
-        }
-    }
+    if (!write_pcm_data(f, left, right, channels, bit_depth, frames, block_align)) return false;
 
     if (data_padding_u64 != 0u) {
         const char padding = 0;
@@ -289,4 +341,24 @@ bool write_wav(const std::string& path,
     }
     f.close();
     return f.good();
+}
+
+} // namespace
+
+bool write_wav(const std::string& path,
+               const std::vector<int32_t>& left,
+               const std::vector<int32_t>& right,
+               uint16_t channels,
+               uint32_t sample_rate,
+               uint8_t bit_depth) {
+    return write_wav_impl(path, left, right, channels, sample_rate, bit_depth, true);
+}
+
+bool write_wav_unchecked_samples(const std::string& path,
+                                 const std::vector<int32_t>& left,
+                                 const std::vector<int32_t>& right,
+                                 uint16_t channels,
+                                 uint32_t sample_rate,
+                                 uint8_t bit_depth) {
+    return write_wav_impl(path, left, right, channels, sample_rate, bit_depth, false);
 }
