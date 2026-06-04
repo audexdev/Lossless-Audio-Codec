@@ -30,6 +30,7 @@ bool Decoder::decode_into(BitReader& br, uint32_t block_size, int32_t* out) {
     constexpr uint32_t kBinTagOne = 0b01u;
     constexpr uint32_t kBinTagTwo = 0b10u;
     constexpr uint32_t kBinTagFallback = 0b11u;
+    constexpr uint8_t kResidualModeStaticRice = 3u;
 
     auto read_rice_unsigned = [](BitReader& reader, uint32_t k, uint32_t& value) -> bool {
         if (k > 31u) return false;
@@ -69,7 +70,7 @@ bool Decoder::decode_into(BitReader& br, uint32_t block_size, int32_t* out) {
                                        size_t offset,
                                        bool stateless) -> bool {
         const bool debug = debug_part;
-        if (residual_mode > 2) return false;
+        if (residual_mode > kResidualModeStaticRice) return false;
 
         uint32_t current_k = initial_k;
         uint64_t sumU = 0;
@@ -253,6 +254,15 @@ bool Decoder::decode_into(BitReader& br, uint32_t block_size, int32_t* out) {
             return idx == samples;
         }
 
+        if (residual_mode == kResidualModeStaticRice) {
+            for (uint32_t i = 0; i < samples; ++i) {
+                uint32_t u = 0;
+                if (!read_rice_unsigned(reader, initial_k, u)) return false;
+                residual[offset + i] = zigzag_decode(u);
+            }
+            return true;
+        }
+
         return false;
     };
 
@@ -365,7 +375,7 @@ bool Decoder::decode_into(BitReader& br, uint32_t block_size, int32_t* out) {
     const uint8_t partition_order =
         static_cast<uint8_t>((control & Block::PARTITION_ORDER_MASK) >> Block::PARTITION_ORDER_SHIFT);
     const uint8_t control_mode = static_cast<uint8_t>((control >> 5) & 0x03u);
-    if (control_mode > 2u) return false;
+    if (control_mode > kResidualModeStaticRice) return false;
     if (partition_flag && partition_order == 0) return false;
     if (!partition_flag && partition_order != 0) return false;
     if (partition_order > Block::MAX_PARTITION_ORDER) return false;
@@ -384,7 +394,7 @@ bool Decoder::decode_into(BitReader& br, uint32_t block_size, int32_t* out) {
         part_modes[i] = static_cast<uint8_t>(br.read_bits(2));
         part_k[i] = br.read_bits(5);
         if (br.has_error()) return false;
-        if (part_modes[i] > 2) return false;
+        if (part_modes[i] > kResidualModeStaticRice) return false;
     }
     if (part_modes[0] != control_mode) return false;
 

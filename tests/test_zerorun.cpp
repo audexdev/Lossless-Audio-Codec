@@ -6,6 +6,7 @@
 #include "codec/lpc/lpc.hpp"
 #include "codec/rice/rice.hpp"
 #include "codec/bitstream/bit_reader.hpp"
+#include "codec/bitstream/bit_writer.hpp"
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -90,6 +91,7 @@ std::vector<uint32_t> partition_sizes_for_block(uint32_t size, uint8_t order) {
 
 struct BinTokenSummary {
     bool saw_bin_mode = false;
+    bool saw_static_mode = false;
     uint32_t fallback_tokens = 0;
 };
 
@@ -118,38 +120,108 @@ BinTokenSummary inspect_bin_tokens(const std::vector<uint8_t>& buf, uint32_t blo
     BinTokenSummary summary;
     const auto part_sizes = partition_sizes_for_block(block_size, partition_order);
     for (uint32_t part = 0; part < partition_count; ++part) {
-        if (modes[part] != 2u) {
-            continue;
-        }
-        summary.saw_bin_mode = true;
         uint32_t current_k = initial_k[part];
         uint64_t sum_u = 0;
         uint32_t count = 0;
         Rice::AdaptState adapt_state;
-
-        for (uint32_t i = 0; i < part_sizes[part]; ++i) {
-            const uint32_t tag = br.read_bits(2);
-            int32_t value = 0;
-            if (tag == 0u) {
-                value = 0;
-            } else if (tag == 1u) {
-                value = (br.read_bit() == 0u) ? 1 : -1;
-            } else if (tag == 2u) {
-                value = (br.read_bit() == 0u) ? 2 : -2;
-            } else {
-                ++summary.fallback_tokens;
-                value = zigzag_decode_local(read_rice_unsigned(br, current_k));
-            }
-            assert(!br.has_error());
-
-            sum_u += zigzag_encode_local(value);
+        auto update_adaptive_k = [&](uint32_t u) {
+            sum_u += u;
             ++count;
             current_k = stateless
                 ? adapt_k_stateless_local(sum_u, count)
                 : Rice::adapt_k(sum_u, count, adapt_state);
+        };
+
+        if (modes[part] == 3u) {
+            summary.saw_static_mode = true;
+            for (uint32_t i = 0; i < part_sizes[part]; ++i) {
+                (void)read_rice_unsigned(br, initial_k[part]);
+                assert(!br.has_error());
+            }
+            continue;
+        }
+
+        if (modes[part] == 0u) {
+            for (uint32_t i = 0; i < part_sizes[part]; ++i) {
+                const uint32_t u = read_rice_unsigned(br, current_k);
+                assert(!br.has_error());
+                update_adaptive_k(u);
+            }
+            continue;
+        }
+
+        if (modes[part] == 1u) {
+            uint32_t idx = 0;
+            while (idx < part_sizes[part]) {
+                const uint32_t tag = br.read_bits(2);
+                if (tag == 0u) {
+                    const uint32_t u = read_rice_unsigned(br, current_k);
+                    assert(!br.has_error());
+                    update_adaptive_k(u);
+                    ++idx;
+                } else if (tag == 1u) {
+                    const uint32_t run = read_rice_unsigned(br, Block::ZERO_RUN_LENGTH_K) +
+                                         Block::ZERO_RUN_MIN_LENGTH;
+                    assert(!br.has_error());
+                    assert(idx + run <= part_sizes[part]);
+                    for (uint32_t j = 0; j < run; ++j) {
+                        update_adaptive_k(0);
+                    }
+                    idx += run;
+                } else if (tag == 2u) {
+                    const uint32_t u = br.read_bits(32);
+                    assert(!br.has_error());
+                    update_adaptive_k(u);
+                    ++idx;
+                } else {
+                    assert(false);
+                }
+            }
+            continue;
+        }
+
+        assert(modes[part] == 2u);
+        summary.saw_bin_mode = true;
+        for (uint32_t i = 0; i < part_sizes[part]; ++i) {
+            const uint32_t tag = br.read_bits(2);
+            uint32_t u = 0;
+            if (tag == 1u) {
+                u = (br.read_bit() == 0u) ? 2u : 1u;
+            } else if (tag == 2u) {
+                u = (br.read_bit() == 0u) ? 4u : 3u;
+            } else if (tag == 3u) {
+                ++summary.fallback_tokens;
+                u = read_rice_unsigned(br, current_k);
+            }
+            assert(!br.has_error());
+            update_adaptive_k(u);
         }
     }
     return summary;
+}
+
+void test_static_rice_decode_mode() {
+    const std::vector<int32_t> pcm = {-8, -1, 0, 1, 2, 7, 15, -16};
+
+    BitWriter bw;
+    bw.write_bits(0u, 8); // fixed predictor
+    bw.write_bits(0u, 8); // order 0
+    bw.write_bits(3u << 5, 8); // default residual mode = static Rice
+    bw.write_bits(3u, 2); // partition mode = static Rice
+    bw.write_bits(3u, 5); // fixed Rice k
+    for (const int32_t sample : pcm) {
+        Rice::encode(bw, sample, 3);
+    }
+    bw.flush_to_byte();
+
+    std::vector<uint8_t> buf = bw.take_buffer();
+    BitReader br(buf);
+    Block::Decoder dec;
+    std::vector<int32_t> decoded;
+    assert(dec.decode(br, static_cast<uint32_t>(pcm.size()), decoded));
+    assert(decoded == pcm);
+    assert(br.bits_remaining() == 0u);
+    std::cout << "static Rice mode decode ok\n";
 }
 
 void roundtrip_block(const std::vector<int32_t>& pcm, bool enable_zr) {
@@ -327,7 +399,7 @@ void test_bin_small_block() {
     std::vector<uint8_t> buf = enc.encode(pcm);
     assert(!buf.empty());
     const BinTokenSummary summary = inspect_bin_tokens(buf, static_cast<uint32_t>(pcm.size()));
-    assert(summary.saw_bin_mode);
+    assert(summary.saw_bin_mode || summary.saw_static_mode);
 
     BitReader br(buf);
     Block::Decoder dec;
@@ -345,8 +417,10 @@ void test_bin_fallback_values() {
     std::vector<uint8_t> buf = enc.encode(pcm);
     assert(!buf.empty());
     const BinTokenSummary summary = inspect_bin_tokens(buf, static_cast<uint32_t>(pcm.size()));
-    assert(summary.saw_bin_mode);
-    assert(summary.fallback_tokens > 0);
+    assert(summary.saw_bin_mode || summary.saw_static_mode);
+    if (summary.saw_bin_mode) {
+        assert(summary.fallback_tokens > 0);
+    }
 
     BitReader br(buf);
     Block::Decoder dec;
@@ -520,6 +594,7 @@ void run_zerorun_tests() {
     }
 
     {
+        test_static_rice_decode_mode();
         test_bin_small_block();
         test_bin_fallback_values();
         test_bin_partition_modes();

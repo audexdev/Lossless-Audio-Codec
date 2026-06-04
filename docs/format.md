@@ -194,7 +194,7 @@ Current limits:
 - minimum partition size: 32 samples
 - maximum partition order: 8
 
-The partition flag must be set when `partition_order > 0` and unset when `partition_order == 0`. The default residual mode must be `0`, `1`, or `2`, and it must match the first partition metadata entry. Partitioned blocks use stateless Rice adaptation inside each partition. Unpartitioned blocks use stateful Rice adaptation.
+The partition flag must be set when `partition_order > 0` and unset when `partition_order == 0`. The default residual mode must be `0`, `1`, `2`, or `3`, and it must match the first partition metadata entry. Modes `0`, `1`, and `2` use Rice adaptation: partitioned blocks use stateless adaptation inside each partition, while unpartitioned blocks use stateful adaptation. Mode `3` uses a fixed Rice parameter for the whole partition.
 
 Partition sizes are computed as:
 
@@ -247,7 +247,7 @@ write one zero bit
 write r as k bits when k > 0
 ```
 
-The initial `k` for each residual segment comes from that partition's `u5 initial_k` metadata. `k` is updated after each logical residual sample, including samples represented by zero-run tokens.
+For adaptive residual modes, the initial `k` for each residual segment comes from that partition's `u5 initial_k` metadata. `k` is updated after each logical residual sample, including samples represented by zero-run tokens.
 
 #### Stateless Adaptation
 
@@ -380,6 +380,10 @@ Bin mode uses compact tags for common residuals:
 The fallback path uses the same adaptive `k` model.
 
 Every bin token represents exactly one residual sample. Tags `00`, `01`, and `10` update the adaptive model with unsigned values `0`, `2 or 1`, and `4 or 3` respectively after sign reconstruction. Tag `11` decodes one Rice-coded residual using the current `k`, then updates the same adaptive model.
+
+### Mode 3: Static Rice
+
+Static Rice mode uses the same zigzag mapping and Rice bit coding as mode `0`, but `k` is fixed to the partition's `u5 initial_k` value for every residual in the partition. No adaptive state is updated and `k` never changes.
 
 ## Padding
 

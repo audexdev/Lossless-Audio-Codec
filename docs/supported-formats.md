@@ -71,7 +71,7 @@ The current `.lac` container supports:
 - LR, mid/side, or per-block stereo mode
 - block sizes up to `16384` samples per channel
 - fixed, FIR, and LPC predictors
-- adaptive Rice, zero-run, and small-residual bin residual modes
+- adaptive Rice, zero-run, small-residual bin, and static Rice residual modes
 
 See `docs/format.md` for bitstream details.
 

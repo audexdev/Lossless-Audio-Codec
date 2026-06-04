@@ -298,6 +298,19 @@ std::vector<uint32_t> v3_block_sizes(const std::vector<uint8_t>& stream) {
     return sizes;
 }
 
+std::vector<uint32_t> v3_payload_sizes(const std::vector<uint8_t>& stream) {
+    assert(stream.size() >= 14);
+    assert(stream[2] == 3u);
+    const uint32_t block_count = get_u32_be(stream, 10);
+    assert(14u + static_cast<size_t>(block_count) * 8u <= stream.size());
+    std::vector<uint32_t> sizes;
+    sizes.reserve(block_count);
+    for (uint32_t i = 0; i < block_count; ++i) {
+        sizes.push_back(get_u32_be(stream, 18u + static_cast<size_t>(i) * 8u));
+    }
+    return sizes;
+}
+
 std::vector<uint8_t> v3_stereo_flags(const std::vector<uint8_t>& stream) {
     assert(stream.size() >= 14);
     assert(stream[2] == 3u);
@@ -315,6 +328,30 @@ std::vector<uint8_t> v3_stereo_flags(const std::vector<uint8_t>& stream) {
     }
     assert(payload_offset == stream.size());
     return flags;
+}
+
+void assert_per_block_stereo_payload_consistency(const std::vector<uint8_t>& auto_stream,
+                                                 const std::vector<uint8_t>& lr_stream,
+                                                 const std::vector<uint8_t>& ms_stream) {
+    assert(v3_block_sizes(auto_stream) == v3_block_sizes(lr_stream));
+    assert(v3_block_sizes(auto_stream) == v3_block_sizes(ms_stream));
+
+    const std::vector<uint8_t> flags = v3_stereo_flags(auto_stream);
+    const std::vector<uint32_t> auto_payloads = v3_payload_sizes(auto_stream);
+    const std::vector<uint32_t> lr_payloads = v3_payload_sizes(lr_stream);
+    const std::vector<uint32_t> ms_payloads = v3_payload_sizes(ms_stream);
+    assert(flags.size() == auto_payloads.size());
+    assert(flags.size() == lr_payloads.size());
+    assert(flags.size() == ms_payloads.size());
+
+    uint64_t expected_payload_bytes = 0;
+    for (size_t i = 0; i < flags.size(); ++i) {
+        assert(flags[i] == 0u || flags[i] == 1u);
+        const uint32_t selected_payload = (flags[i] == 1u) ? ms_payloads[i] : lr_payloads[i];
+        assert(auto_payloads[i] == selected_payload + 1u);
+        expected_payload_bytes += auto_payloads[i];
+    }
+    assert(auto_stream.size() == v3_payload_offset(auto_stream) + expected_payload_bytes);
 }
 
 void append_fourcc(std::vector<uint8_t>& out, const char* fourcc) {
@@ -693,10 +730,7 @@ void run_stereo_planner_tests() {
     const std::vector<uint8_t> auto_random_stream = auto_encoder.encode(random_left, random_right);
     const std::vector<uint8_t> lr_random_stream = forced_lr.encode(random_left, random_right);
     const std::vector<uint8_t> ms_random_stream = forced_ms.encode(random_left, random_right);
-    const std::vector<uint8_t> auto_random_flags = v3_stereo_flags(auto_random_stream);
-    assert(std::all_of(auto_random_flags.begin(), auto_random_flags.end(), [](uint8_t flag) { return flag == 0u; }));
-    assert(auto_random_stream.size() == lr_random_stream.size() + auto_random_flags.size());
-    assert(auto_random_stream.size() < ms_random_stream.size());
+    assert_per_block_stereo_payload_consistency(auto_random_stream, lr_random_stream, ms_random_stream);
 
     std::vector<int32_t> alternating_left(4095);
     std::vector<int32_t> alternating_right(4095);
@@ -734,10 +768,7 @@ void run_stereo_planner_tests() {
     const std::vector<uint8_t> auto_walk_stream = auto_encoder.encode(walk_left, walk_right);
     const std::vector<uint8_t> lr_walk_stream = forced_lr.encode(walk_left, walk_right);
     const std::vector<uint8_t> ms_walk_stream = forced_ms.encode(walk_left, walk_right);
-    const std::vector<uint8_t> auto_walk_flags = v3_stereo_flags(auto_walk_stream);
-    assert(std::all_of(auto_walk_flags.begin(), auto_walk_flags.end(), [](uint8_t flag) { return flag == 0u; }));
-    assert(auto_walk_stream.size() == lr_walk_stream.size() + auto_walk_flags.size());
-    assert(auto_walk_stream.size() < ms_walk_stream.size());
+    assert_per_block_stereo_payload_consistency(auto_walk_stream, lr_walk_stream, ms_walk_stream);
 
     std::vector<int32_t> long_walk_left(Block::MAX_BLOCK_SIZE);
     std::vector<int32_t> long_walk_right(Block::MAX_BLOCK_SIZE);
@@ -757,10 +788,7 @@ void run_stereo_planner_tests() {
     const std::vector<uint8_t> auto_long_walk_stream = auto_encoder.encode(long_walk_left, long_walk_right);
     const std::vector<uint8_t> lr_long_walk_stream = forced_lr.encode(long_walk_left, long_walk_right);
     const std::vector<uint8_t> ms_long_walk_stream = forced_ms.encode(long_walk_left, long_walk_right);
-    const std::vector<uint8_t> auto_long_walk_flags = v3_stereo_flags(auto_long_walk_stream);
-    assert(auto_long_walk_flags == std::vector<uint8_t>{0u});
-    assert(auto_long_walk_stream.size() == lr_long_walk_stream.size() + auto_long_walk_flags.size());
-    assert(auto_long_walk_stream.size() < ms_long_walk_stream.size());
+    assert_per_block_stereo_payload_consistency(auto_long_walk_stream, lr_long_walk_stream, ms_long_walk_stream);
 
     std::vector<int32_t> noise_left(Block::MAX_BLOCK_SIZE);
     std::vector<int32_t> noise_right(Block::MAX_BLOCK_SIZE);
