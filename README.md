@@ -97,7 +97,7 @@ LAC_THREADS=4 ctest --test-dir build-tests --output-on-failure
 
 The default CTest configuration uses lightweight generated WAV fixtures and exercises both internal codec paths and `lac_cli` subprocess roundtrips. To opt into larger local E2E fixtures, configure with `-DLAC_TEST_ASSETS_DIR="$PWD/assets"`. The generated fixtures keep clean checkouts and routine development self-contained.
 
-Set `LAC_THREADS=N` to cap encode and decode worker threads during tests. The heavier `test_all.sh` asset roundtrip script defaults to `LAC_THREADS=12` unless the environment already sets a different value.
+Set `LAC_THREADS=N` to cap encode and decode worker threads in the `lac_cli` binary; `--threads=N` takes precedence over it. This is resolved by the CLI, so it applies to `lac_cli` usage and the CLI subprocess tests (the internal codec unit tests set their own thread counts). The heavier `test_all.sh` asset roundtrip script defaults to `LAC_THREADS=12` unless the environment already sets a different value.
 
 ## Contributing
 

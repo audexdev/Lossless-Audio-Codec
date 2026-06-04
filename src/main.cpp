@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 #include <string>
 #include <cmath>
@@ -315,9 +316,8 @@ static FastDecodeStatus decode_lac_v3_to_mapped_wav(const uint8_t* data,
 
   size_t hardware_threads =
       std::max<size_t>(1, static_cast<size_t>(std::thread::hardware_concurrency()));
-  const size_t resolved_limit = LAC::resolve_thread_limit(thread_count);
-  if (resolved_limit > 0) {
-    hardware_threads = std::min(hardware_threads, resolved_limit);
+  if (thread_count > 0) {
+    hardware_threads = std::min(hardware_threads, thread_count);
   }
   const size_t worker_count = std::min<size_t>(hardware_threads, block_count);
 
@@ -583,6 +583,13 @@ static bool parse_threads_flag(const std::string& flag, size_t& out_threads) {
   return true;
 }
 
+static size_t resolve_cli_thread_count(size_t explicit_count) {
+  // CLI owns environment resolution: --threads (explicit_count) wins, else
+  // LAC_THREADS. The library never reads the environment itself.
+  if (explicit_count > 0) return explicit_count;
+  return LAC::parse_thread_limit(std::getenv("LAC_THREADS"));
+}
+
 static void usage() {
   std::cerr << "Usage:\n";
   std::cerr << "  lac_cli encode input.wav output.lac [--stereo-mode=lr|ms] [--threads=N] [--debug-threads] [--debug-lpc] [--debug-stereo-est] [--debug-zr] [--debug-partitions] [--no-partitioning]\n";
@@ -643,6 +650,7 @@ int main(int argc, char** argv) {
           return 1;
         }
       }
+      thread_count = resolve_cli_thread_count(thread_count);
       std::vector<int32_t> left, right;
       uint16_t channels = 0;
       uint32_t sample_rate = 0;
@@ -725,6 +733,7 @@ int main(int argc, char** argv) {
           return 1;
         }
       }
+      thread_count = resolve_cli_thread_count(thread_count);
       std::vector<uint8_t> bitstream;
       if (!load_file(in_path, bitstream)) {
         std::cerr << "Failed to read LAC file: " << in_path << "\n";
