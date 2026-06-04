@@ -35,9 +35,6 @@ public:
 
     static bool decode(BitReader& r, uint32_t k, int32_t& value);
 
-    // Compute optimal k from residual block
-    static uint32_t compute_k(const std::vector<int32_t>& residuals);
-
     static uint32_t adapt_k(uint64_t sum, uint32_t count, AdaptState& state);
 
 private:

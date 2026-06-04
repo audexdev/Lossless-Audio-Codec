@@ -792,6 +792,8 @@ int main(int argc, char** argv) {
     }
 
     if (mode == "selftest") {
+      // Kept in the CLI on purpose: CI runs `lac_cli selftest` as a build-time
+      // smoke test, and it gives end users a dependency-free roundtrip check.
       const double pi = 3.14159265358979323846;
       constexpr int32_t pcm24_max = 0x7FFFFF;
 
@@ -844,6 +846,37 @@ int main(int argc, char** argv) {
         }
         if (hdr_ms.sample_rate != sample_rate || hdr_ms.bit_depth != bit_depth) {
           std::cerr << "MS header mismatch sr=" << hdr_ms.sample_rate << " depth=" << int(hdr_ms.bit_depth) << "\n";
+          return false;
+        }
+
+        // Per-block (auto) stereo, stereo_mode 2.
+        LAC::Encoder enc_auto(12, 2, sample_rate, bit_depth);
+        std::vector<uint8_t> bs_auto = enc_auto.encode(src_left, src_right);
+        std::vector<int32_t> dec_auto_left, dec_auto_right;
+        FrameHeader hdr_auto;
+        decoder.decode(bs_auto.data(), bs_auto.size(), dec_auto_left, dec_auto_right, &hdr_auto);
+        if (dec_auto_left != src_left || dec_auto_right != src_right) {
+          std::cerr << "Auto-stereo roundtrip mismatch for sr=" << sample_rate << " depth=" << int(bit_depth) << "\n";
+          return false;
+        }
+        if (hdr_auto.stereo_mode != 2) {
+          std::cerr << "Auto-stereo header mismatch stereo_mode=" << int(hdr_auto.stereo_mode) << "\n";
+          return false;
+        }
+
+        // Mono.
+        std::vector<int32_t> empty_right;
+        LAC::Encoder enc_mono(12, 0, sample_rate, bit_depth);
+        std::vector<uint8_t> bs_mono = enc_mono.encode(src_left, empty_right);
+        std::vector<int32_t> dec_mono_left, dec_mono_right;
+        FrameHeader hdr_mono;
+        decoder.decode(bs_mono.data(), bs_mono.size(), dec_mono_left, dec_mono_right, &hdr_mono);
+        if (dec_mono_left != src_left || !dec_mono_right.empty()) {
+          std::cerr << "Mono roundtrip mismatch for sr=" << sample_rate << " depth=" << int(bit_depth) << "\n";
+          return false;
+        }
+        if (hdr_mono.channels != 1) {
+          std::cerr << "Mono header mismatch channels=" << int(hdr_mono.channels) << "\n";
           return false;
         }
 
