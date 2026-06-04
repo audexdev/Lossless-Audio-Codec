@@ -12,7 +12,6 @@
 #include <utility>
 #include <iostream>
 #include "codec/simd/neon.hpp"
-#include "codec/lac/thread_limit.hpp"
 #include "utils/logger.hpp"
 
 namespace {
@@ -384,7 +383,7 @@ namespace LAC {
     };
 
     size_t hardware_threads = std::max<size_t>(1, static_cast<size_t>(std::thread::hardware_concurrency()));
-    const size_t thread_limit = LAC::resolve_thread_limit(this->thread_count);
+    const size_t thread_limit = this->thread_count;  // 0 = auto; env is resolved by the CLI
     if (thread_limit > 0) {
       hardware_threads = std::min(hardware_threads, thread_limit);
     }

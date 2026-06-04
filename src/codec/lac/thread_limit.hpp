@@ -27,9 +27,8 @@ inline size_t parse_thread_limit(const char* value) {
     return static_cast<size_t>(parsed);
 }
 
-inline size_t resolve_thread_limit(size_t explicit_limit) {
-    if (explicit_limit > 0) return explicit_limit;
-    return parse_thread_limit(std::getenv("LAC_THREADS"));
-}
+// Note: this header intentionally no longer resolves LAC_THREADS. Reading the
+// environment is the CLI's job; the library uses the explicit thread count it
+// is given (0 = auto). See main.cpp resolve_cli_thread_count.
 
 } // namespace LAC
