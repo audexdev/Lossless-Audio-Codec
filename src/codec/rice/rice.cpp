@@ -47,22 +47,3 @@ bool Rice::decode(BitReader& r, uint32_t k, int32_t& value) {
     value = unsigned_to_signed(u);
     return true;
 }
-
-uint32_t Rice::compute_k(const std::vector<int32_t>& residuals) {
-    uint64_t sum = 0;
-    for (int32_t v : residuals) {
-        uint32_t u = signed_to_unsigned(v);
-        sum += u;
-    }
-
-    if (residuals.empty()) return 0;
-
-    double mean = double(sum) / double(residuals.size());
-
-    uint32_t k = 0;
-    while ((1u << k) < (uint32_t)(mean + 0.5) && k < 31) {
-        k++;
-    }
-
-    return k;
-}

@@ -11,7 +11,6 @@ set(LAC_TEST_ASSETS_DIR "${PROJECT_BINARY_DIR}/lac-test-assets" CACHE PATH "Opti
 find_package(Threads REQUIRED)
 
 add_library(lac STATIC
-    src/codec/bitstream/bit_reader.cpp
     src/codec/bitstream/bit_writer.cpp
     src/codec/block/decoder.cpp
     src/codec/block/encoder.cpp
@@ -21,7 +20,6 @@ add_library(lac STATIC
     src/codec/rice/rice.cpp
     src/codec/simd/neon.cpp
     src/io/wav_io.cpp
-    src/utils/logger.cpp
 
     src/codec/bitstream/bit_reader.hpp
     src/codec/bitstream/bit_writer.hpp
@@ -37,7 +35,6 @@ add_library(lac STATIC
     src/codec/rice/rice.hpp
     src/codec/simd/neon.hpp
     src/io/wav_io.hpp
-    src/utils/endian.hpp
     src/utils/logger.hpp
     include/lac/lac.hpp
     include/lac/version.hpp
