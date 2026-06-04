@@ -245,8 +245,18 @@ void Decoder::decode(const uint8_t* data,
     std::atomic<bool> stop_requested{false};
     std::mutex error_mutex;
     std::exception_ptr worker_error;
-    std::vector<std::jthread> workers;
+    std::vector<std::thread> workers;
     workers.reserve(worker_count);
+    // Join every started worker even if thread construction throws mid-startup,
+    // so a partial launch cannot destroy joinable threads and call std::terminate.
+    struct WorkerJoinGuard {
+      std::vector<std::thread>& workers;
+      ~WorkerJoinGuard() {
+        for (auto& worker : workers) {
+          if (worker.joinable()) worker.join();
+        }
+      }
+    } worker_join_guard{workers};
 
     for (size_t worker_idx = 0; worker_idx < worker_count; ++worker_idx) {
       workers.emplace_back([&]() {
