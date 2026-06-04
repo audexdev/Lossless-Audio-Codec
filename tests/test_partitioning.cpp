@@ -198,6 +198,40 @@ void run_partitioning_tests() {
         BitReader overflow(overflow_bytes);
         assert(!overflow.read_unary_ones(7u, ones));
 
+        for (uint32_t prefix_bits : {0u, 1u, 5u}) {
+            for (uint32_t unary_ones : {0u, 1u, 7u, 8u, 9u, 255u, 256u, 4095u}) {
+                BitWriter writer;
+                writer.write_bits(0u, static_cast<int>(prefix_bits));
+                writer.write_unary_ones(unary_ones);
+                writer.write_bit(0u);
+                writer.flush_to_byte();
+
+                BitReader reader(writer.get_buffer());
+                (void)reader.read_bits(static_cast<int>(prefix_bits));
+                uint32_t decoded_ones = 0;
+                assert(reader.read_unary_ones(unary_ones, decoded_ones));
+                assert(decoded_ones == unary_ones);
+            }
+        }
+
+        for (uint32_t prefix_bits = 0; prefix_bits <= 7u; ++prefix_bits) {
+            for (uint32_t value_bits = 1; value_bits <= 32u; ++value_bits) {
+                const uint32_t value = 0xA5F03C96u;
+                const uint32_t expected = (value_bits == 32u)
+                    ? value
+                    : (value & ((1u << value_bits) - 1u));
+                BitWriter writer;
+                writer.write_bits(0u, static_cast<int>(prefix_bits));
+                writer.write_bits(expected, static_cast<int>(value_bits));
+                writer.flush_to_byte();
+
+                BitReader reader(writer.get_buffer());
+                (void)reader.read_bits(static_cast<int>(prefix_bits));
+                assert(reader.read_bits(static_cast<int>(value_bits)) == expected);
+                assert(!reader.has_error());
+            }
+        }
+
         BitWriter min_writer;
         Rice::encode(min_writer, std::numeric_limits<int32_t>::min(), 31u);
         min_writer.flush_to_byte();

@@ -4,7 +4,7 @@
 [![CodeQL](https://github.com/audexdev/Lossless-Audio-Codec/actions/workflows/codeql.yml/badge.svg)](https://github.com/audexdev/Lossless-Audio-Codec/actions/workflows/codeql.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-LAC is an experimental CLI-first C++20 lossless audio codec for PCM WAV audio. It is a compact implementation of a custom `.lac` container and bitstream with LPC prediction, adaptive Rice coding, mid/side stereo, zero-run residual coding, residual partitioning, Apple Silicon NEON acceleration, and multithreaded block encoding.
+LAC is an experimental CLI-first C++20 lossless audio codec for PCM WAV audio. It is a compact implementation of a custom `.lac` container and bitstream with LPC prediction, adaptive Rice coding, mid/side stereo, zero-run residual coding, residual partitioning, Apple Silicon NEON acceleration, and multithreaded block encoding and decoding.
 
 The current product contract is `lac_cli encode` followed by `lac_cli decode` for the documented PCM WAV domain. The project is intended for codec experimentation, implementation study, and reproducible work on lossless audio compression internals. The file format is still experimental and should not yet be treated as a long-term archival format.
 
@@ -68,12 +68,13 @@ Choose a stereo mode explicitly:
 ./build/lac_cli encode input.wav output.lac --stereo-mode=ms
 ```
 
-Stereo encoding defaults to automatic per-block LR or mid/side selection. Mono input always uses LR metadata. Restored WAV files preserve PCM samples, channel count, sample rate, and bit depth, but ancillary WAV chunks are not copied. Input and output paths must refer to different files.
+Stereo encoding defaults to automatic per-block LR or mid/side selection. Mono input always uses LR metadata. Restored WAV files preserve PCM samples, channel count, sample rate, and bit depth, but ancillary WAV chunks are not copied. Input and output paths must refer to different files. The CLI stages output beside the requested path and publishes it only after the completed file closes successfully.
 
-Limit encoder worker threads:
+Limit codec worker threads:
 
 ```sh
 ./build/lac_cli encode input.wav output.lac --threads=12
+./build/lac_cli decode output.lac restored.wav --threads=12
 LAC_THREADS=12 ./build/lac_cli encode input.wav output.lac
 ```
 
@@ -96,7 +97,7 @@ LAC_THREADS=4 ctest --test-dir build-tests --output-on-failure
 
 The default CTest configuration uses lightweight generated WAV fixtures and exercises both internal codec paths and `lac_cli` subprocess roundtrips. To opt into larger local E2E fixtures, configure with `-DLAC_TEST_ASSETS_DIR="$PWD/assets"`. The generated fixtures keep clean checkouts and routine development self-contained.
 
-Set `LAC_THREADS=N` to cap encoder worker threads during tests. The heavier `test_all.sh` asset roundtrip script defaults to `LAC_THREADS=12` unless the environment already sets a different value.
+Set `LAC_THREADS=N` to cap encode and decode worker threads during tests. The heavier `test_all.sh` asset roundtrip script defaults to `LAC_THREADS=12` unless the environment already sets a different value.
 
 ## Contributing
 
@@ -104,7 +105,7 @@ Contribution setup, review expectations, and local development commands are docu
 
 ## Format
 
-The current `.lac` bitstream is documented in [docs/format.md](docs/format.md). The format is versioned internally as frame version `2`, but it is not yet frozen for external compatibility.
+The current `.lac` bitstream is documented in [docs/format.md](docs/format.md). The encoder emits frame version `3`, while the decoder retains serial compatibility for canonical version `2` streams. The format is not yet frozen for external compatibility.
 Supported WAV/PCM input and output constraints are documented in [docs/supported-formats.md](docs/supported-formats.md).
 
 ## Security

@@ -1,5 +1,6 @@
 #include "bit_writer.hpp"
 #include <algorithm>
+#include <utility>
 
 namespace {
 inline uint32_t low_bits_mask(int bits) {
@@ -68,6 +69,39 @@ void BitWriter::write_bits(uint32_t value, int nbits) {
     }
 }
 
+void BitWriter::write_unary_ones(uint32_t ones) {
+    while (this->bit_pos != 0 && ones > 0) {
+        this->write_bit(1u);
+        --ones;
+    }
+
+    if (ones >= 8) {
+        const size_t bytes = ones / 8;
+        this->buffer.insert(this->buffer.end(), bytes, 0xFFu);
+        ones -= static_cast<uint32_t>(bytes * 8);
+    }
+
+    while (ones > 0) {
+        this->write_bit(1u);
+        --ones;
+    }
+}
+
+void BitWriter::write_bytes(const uint8_t* data, size_t size) {
+    if (data == nullptr || size == 0) return;
+    if (this->bit_pos == 0) {
+        this->buffer.insert(this->buffer.end(), data, data + size);
+        return;
+    }
+    for (size_t i = 0; i < size; ++i) {
+        this->write_bits(data[i], 8);
+    }
+}
+
+void BitWriter::reserve_bytes(size_t size) {
+    this->buffer.reserve(size);
+}
+
 void BitWriter::flush_to_byte() {
     if (this->bit_pos == 0) return;
 
@@ -78,4 +112,8 @@ void BitWriter::flush_to_byte() {
 
 const std::vector<uint8_t>& BitWriter::get_buffer() const {
     return this->buffer;
+}
+
+std::vector<uint8_t> BitWriter::take_buffer() {
+    return std::move(this->buffer);
 }

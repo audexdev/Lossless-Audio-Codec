@@ -18,19 +18,33 @@ This document describes the current experimental `.lac` format implemented by th
 ```text
 FrameHeader
 u32 block_count
-u32 block_size[block_count]
+repeat block_count:
+    u32 block_size
+    u32 compressed_size_bytes
 BlockPayload[block_count]
 ```
 
-The block-size table gives the number of samples per channel in each block. Every channel payload in the same block uses the same `block_size`.
+The version `3` block table gives the number of samples per channel and the complete encoded byte length for each block. `compressed_size_bytes` covers the optional per-block stereo flag and every byte-padded channel block. Every channel payload in the same block uses the same `block_size`.
 
 Current top-level limits:
 
 - `block_count` must be non-zero.
-- `block_count` must not exceed `1048576`, and the complete block-size table must be present before allocation.
+- `block_count` must not exceed `1048576`, and the complete block table must be present before allocation.
 - Each `block_size` must be non-zero and no larger than `16384` samples per channel.
+- Each `compressed_size_bytes` must be non-zero, and their sum must exactly match the remaining frame payload bytes.
 - Every non-final block must contain at least `256` samples per channel. The final block may be shorter.
 - The total declared sample count must fit within the implementation's 1 GiB decoded-PCM allocation limit and the classic RIFF/WAV output size limit.
+
+Version `2` streams use the legacy table layout:
+
+```text
+FrameHeader(version = 2)
+u32 block_count
+u32 block_size[block_count]
+BlockPayload[block_count]
+```
+
+Version `2` remains decode-compatible, but it does not carry encoded block boundaries and is decoded serially.
 
 ## Frame Header
 
@@ -39,7 +53,7 @@ The frame header is 80 bits, currently 10 bytes:
 | Field | Bits | Meaning |
 | --- | ---: | --- |
 | sync | 16 | `0x4C41` (`LA`) |
-| version | 8 | current format version, `2` |
+| version | 8 | current encoder format version, `3`; legacy decode also accepts `2` |
 | channels | 8 | `1` mono or `2` stereo |
 | stereo_mode | 8 | `0` LR, `1` mid/side, `2` per-block stereo |
 | sample_rate_low | 16 | low 16 bits of sample rate |
@@ -373,10 +387,10 @@ Each channel block is flushed to the next byte boundary after residual encoding.
 
 ## Integrity
 
-The current format does not include a checksum, frame CRC, block CRC, or authenticated length field. Decoders validate structural fields strictly and reject trailing garbage, impossible block sizes, invalid residual tags, Rice values or predictor reconstruction outside the signed 32-bit domain, non-zero reserved fields or padding, and non-canonical metadata. Without an integrity field, a modified payload can still decode successfully if it remains structurally valid and produces in-range PCM samples.
+The current format does not include a checksum, frame CRC, block CRC, or authenticated length field. Version `3` compressed block lengths are structural boundaries, not integrity protection. Decoders validate structural fields strictly and reject trailing garbage, impossible block sizes, mismatched version `3` payload lengths, invalid residual tags, Rice values or predictor reconstruction outside the signed 32-bit domain, non-zero reserved fields or padding, and non-canonical metadata. Without an integrity field, a modified payload can still decode successfully if it remains structurally valid and produces in-range PCM samples.
 
 ## Compatibility
 
-The format version is currently `2`, but the format is still experimental. Future work may add stronger validation, checksums, fuzzed compatibility tests, streaming decode constraints, or a frozen public specification.
+The encoder currently emits format version `3`, but the format is still experimental. Version `3` adds compressed block byte lengths so blocks can be validated and decoded independently. Future work may add stronger validation, checksums, fuzzed compatibility tests, streaming decode constraints, or a frozen public specification.
 
-The canonical version `2` byte sequences emitted by the encoder are unchanged by decoder hardening. Hardened decoders may reject version `2` byte sequences that older permissive decoders accepted when those sequences contain non-canonical reserved fields, metadata, padding, stereo flags, block tables, or trailing payload bytes.
+The decoder retains serial compatibility for canonical version `2` streams. Hardened decoders may reject version `2` byte sequences that older permissive decoders accepted when those sequences contain non-canonical reserved fields, metadata, padding, stereo flags, block tables, or trailing payload bytes.

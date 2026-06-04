@@ -1,5 +1,8 @@
 #include <iostream>
 #include <fstream>
+#include <atomic>
+#include <cerrno>
+#include <cstdint>
 #include <vector>
 #include <string>
 #include <cmath>
@@ -7,7 +10,18 @@
 #include <algorithm>
 #include <filesystem>
 #include <limits>
+#include <random>
+#include <sstream>
 #include <stdexcept>
+#include <system_error>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#endif
 #include "io/wav_io.hpp"
 #include "codec/lac/encoder.hpp"
 #include "codec/lac/decoder.hpp"
@@ -53,6 +67,120 @@ static bool paths_refer_to_same_file(const std::string& input_path, const std::s
   return !ec && normalized_input == normalized_output;
 }
 
+static std::string temporary_output_suffix() {
+  static std::atomic<uint64_t> sequence{0};
+  uint64_t token =
+      static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+  token ^= ++sequence;
+  try {
+    std::random_device random;
+    token ^= (static_cast<uint64_t>(random()) << 32) ^ random();
+  } catch (...) {
+    // The clock and process-local sequence still provide collision retry input.
+  }
+  std::ostringstream out;
+  out << std::hex << token;
+  return out.str();
+}
+
+static bool replace_output_file(const std::filesystem::path& temporary_path,
+                                const std::filesystem::path& output_path) {
+#ifdef _WIN32
+  return MoveFileExW(temporary_path.c_str(),
+                     output_path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+  std::error_code ec;
+  std::filesystem::rename(temporary_path, output_path, ec);
+  return !ec;
+#endif
+}
+
+static bool create_private_directory(const std::filesystem::path& path,
+                                     std::error_code& ec) {
+#ifdef _WIN32
+  return std::filesystem::create_directory(path, ec);
+#else
+  if (::mkdir(path.c_str(), S_IRWXU) == 0) {
+    if (::chmod(path.c_str(), S_IRWXU) != 0) {
+      ec = std::error_code(errno, std::generic_category());
+      std::error_code cleanup_ec;
+      std::filesystem::remove(path, cleanup_ec);
+      return false;
+    }
+    ec.clear();
+    return true;
+  }
+  ec = std::error_code(errno, std::generic_category());
+  return false;
+#endif
+}
+
+class StagedOutputFile {
+public:
+  explicit StagedOutputFile(const std::string& output_path)
+      : output_path(output_path) {
+    const std::filesystem::path parent =
+        this->output_path.parent_path().empty()
+            ? std::filesystem::path(".")
+            : this->output_path.parent_path();
+    if (this->output_path.filename().empty()) return;
+
+    for (int attempt = 0; attempt < 128; ++attempt) {
+      const auto candidate = parent / (".lac-tmp." + temporary_output_suffix());
+      std::error_code ec;
+      if (!create_private_directory(candidate, ec)) {
+        if (!ec || ec == std::make_error_code(std::errc::file_exists)) continue;
+        return;
+      }
+
+      this->temporary_directory = candidate;
+      this->temporary_path = candidate / "output";
+      return;
+    }
+  }
+
+  ~StagedOutputFile() {
+    this->cleanup();
+  }
+
+  bool is_ready() const {
+    return !this->temporary_path.empty();
+  }
+
+  std::string path() const {
+    return this->temporary_path.string();
+  }
+
+  bool publish(const std::string& input_path) {
+    if (!this->is_ready()) return false;
+    if (paths_refer_to_same_file(input_path, this->output_path.string())) return false;
+    if (!replace_output_file(this->temporary_path, this->output_path)) return false;
+
+    this->temporary_path.clear();
+    std::error_code ec;
+    std::filesystem::remove(this->temporary_directory, ec);
+    if (!ec) this->temporary_directory.clear();
+    return true;
+  }
+
+private:
+  void cleanup() {
+    std::error_code ec;
+    if (!this->temporary_path.empty()) {
+      std::filesystem::remove(this->temporary_path, ec);
+    }
+    ec.clear();
+    if (!this->temporary_directory.empty()) {
+      std::filesystem::remove(this->temporary_directory, ec);
+    }
+  }
+
+  std::filesystem::path output_path;
+  std::filesystem::path temporary_directory;
+  std::filesystem::path temporary_path;
+};
+
 static bool parse_threads_flag(const std::string& flag, size_t& out_threads) {
   const std::string prefix = "--threads=";
   if (flag.rfind(prefix, 0) != 0) {
@@ -82,7 +210,7 @@ static bool parse_threads_flag(const std::string& flag, size_t& out_threads) {
 static void usage() {
   std::cerr << "Usage:\n";
   std::cerr << "  lac_cli encode input.wav output.lac [--stereo-mode=lr|ms] [--threads=N] [--debug-threads] [--debug-lpc] [--debug-stereo-est] [--debug-zr] [--debug-partitions] [--no-partitioning]\n";
-  std::cerr << "  lac_cli decode input.lac output.wav [--debug-threads]\n";
+  std::cerr << "  lac_cli decode input.lac output.wav [--threads=N] [--debug-threads]\n";
   std::cerr << "  lac_cli selftest\n";
 }
 
@@ -176,7 +304,10 @@ int main(int argc, char** argv) {
           << " zr_bytes=" << bitstream.size()
           << " gain=" << gain << "%\n";
       }
-      if (!save_file(out_path, bitstream)) {
+      StagedOutputFile staged_output(out_path);
+      if (!staged_output.is_ready() ||
+          !save_file(staged_output.path(), bitstream) ||
+          !staged_output.publish(in_path)) {
         std::cerr << "Failed to write LAC file: " << out_path << "\n";
         return 1;
       }
@@ -206,10 +337,13 @@ int main(int argc, char** argv) {
         return 1;
       }
       bool debug_threads = false;
+      size_t thread_count = 0;
       for (int i = 4; i < argc; ++i) {
         std::string flag = argv[i];
         if (flag == "--debug-threads") {
           debug_threads = true;
+        } else if (parse_threads_flag(flag, thread_count)) {
+          // Parsed above.
         } else {
           usage();
           return 1;
@@ -223,6 +357,7 @@ int main(int argc, char** argv) {
       LAC::ThreadCollector decoderCollector;
       LAC::ThreadCollector* decoderCollectorPtr = (debug_threads ? &decoderCollector : nullptr);
       LAC::Decoder decoder(decoderCollectorPtr);
+      decoder.set_thread_count(thread_count);
       std::vector<int32_t> left, right;
       FrameHeader hdr;
       decoder.decode(bitstream.data(), bitstream.size(), left, right, &hdr);
@@ -230,7 +365,10 @@ int main(int argc, char** argv) {
         std::cerr << "Decode failed or produced no samples\n";
         return 1;
       }
-      if (!write_wav(out_path, left, right, hdr.channels, hdr.sample_rate, hdr.bit_depth)) {
+      StagedOutputFile staged_output(out_path);
+      if (!staged_output.is_ready() ||
+          !write_wav(staged_output.path(), left, right, hdr.channels, hdr.sample_rate, hdr.bit_depth) ||
+          !staged_output.publish(in_path)) {
         std::cerr << "Failed to write WAV: " << out_path << "\n";
         return 1;
       }

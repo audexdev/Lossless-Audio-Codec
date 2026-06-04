@@ -20,6 +20,9 @@ void run_decoder_error_tests();
 void run_wav_validation_tests();
 void run_encoder_validation_tests();
 void run_thread_limit_tests();
+void run_decoder_thread_tests();
+void run_block_planner_tests();
+void run_stereo_planner_tests();
 
 namespace {
 
@@ -182,6 +185,9 @@ int main() {
     run_predictor_tests();
     run_encoder_validation_tests();
     run_thread_limit_tests();
+    run_decoder_thread_tests();
+    run_block_planner_tests();
+    run_stereo_planner_tests();
     run_decoder_error_tests();
     run_wav_validation_tests();
     run_e2e_tests();

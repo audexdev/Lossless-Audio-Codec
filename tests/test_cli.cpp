@@ -11,6 +11,9 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 namespace {
 
@@ -68,6 +71,12 @@ void save_binary_file(const std::filesystem::path& path, const std::vector<uint8
     }
     f.close();
     assert(f.good());
+}
+
+void assert_no_staged_output_siblings(const std::filesystem::path& dir) {
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        assert(entry.path().filename().string().find(".lac-tmp.") == std::string::npos);
+    }
 }
 
 uint16_t read_u16_le(const std::vector<uint8_t>& data, size_t offset) {
@@ -153,7 +162,7 @@ void assert_roundtrip(const std::filesystem::path& cli,
     std::vector<std::string> encode_args = {"encode", input.string(), encoded.string()};
     encode_args.insert(encode_args.end(), encode_flags.begin(), encode_flags.end());
     assert(run_cli(cli, encode_args));
-    assert(run_cli(cli, {"decode", encoded.string(), restored.string()}));
+    assert(run_cli(cli, {"decode", encoded.string(), restored.string(), "--threads=2"}));
 
     std::vector<int32_t> restored_left;
     std::vector<int32_t> restored_right;
@@ -188,6 +197,23 @@ void assert_same_path_rejected(const std::filesystem::path& cli,
     const auto lac_before = load_binary_file(lac);
     assert(!run_cli(cli, {"decode", lac.string(), lac.string()}));
     assert(load_binary_file(lac) == lac_before);
+
+    const auto wav_alias = dir / "same_path_alias.wav";
+    std::error_code ec;
+    std::filesystem::create_hard_link(wav, wav_alias, ec);
+    if (!ec) {
+        assert(!run_cli(cli, {"encode", wav.string(), wav_alias.string()}));
+        assert(load_binary_file(wav) == wav_before);
+    }
+
+    const auto lac_alias = dir / "same_path_alias.lac";
+    ec.clear();
+    std::filesystem::create_hard_link(lac, lac_alias, ec);
+    if (!ec) {
+        assert(!run_cli(cli, {"decode", lac.string(), lac_alias.string()}));
+        assert(load_binary_file(lac) == lac_before);
+    }
+    assert_no_staged_output_siblings(dir);
 }
 
 void assert_malformed_input_rejected_without_clobber(const std::filesystem::path& cli,
@@ -207,6 +233,7 @@ void assert_malformed_input_rejected_without_clobber(const std::filesystem::path
     save_binary_file(lac_output, lac_sentinel);
     assert(!run_cli(cli, {"encode", malformed_wav.string(), lac_output.string()}));
     assert(load_binary_file(lac_output) == lac_sentinel);
+    assert_no_staged_output_siblings(dir);
 
     assert(run_cli(cli, {"encode", valid_wav.string(), valid_lac.string()}));
     auto lac_bytes = load_binary_file(valid_lac);
@@ -216,6 +243,161 @@ void assert_malformed_input_rejected_without_clobber(const std::filesystem::path
     save_binary_file(wav_output, wav_sentinel);
     assert(!run_cli(cli, {"decode", malformed_lac.string(), wav_output.string()}));
     assert(load_binary_file(wav_output) == wav_sentinel);
+    assert_no_staged_output_siblings(dir);
+}
+
+void assert_existing_output_overwritten(const std::filesystem::path& cli,
+                                        const std::filesystem::path& dir) {
+    const auto wav = dir / "overwrite_source.wav";
+    const auto lac = dir / "overwrite_output.lac";
+    const auto restored = dir / "overwrite_restored.wav";
+    const auto left = make_samples(64, 24, 0);
+    const auto right = make_samples(64, 24, 37);
+    assert(write_wav(wav.string(), left, right, 2, 48000, 24));
+
+    const std::vector<uint8_t> sentinel = {0xAAu, 0x55u, 0xAAu};
+    save_binary_file(lac, sentinel);
+    assert(run_cli(cli, {"encode", wav.string(), lac.string()}));
+    assert(load_binary_file(lac) != sentinel);
+    assert_no_staged_output_siblings(dir);
+
+    save_binary_file(restored, sentinel);
+    assert(run_cli(cli, {"decode", lac.string(), restored.string()}));
+    std::vector<int32_t> restored_left;
+    std::vector<int32_t> restored_right;
+    uint16_t channels = 0;
+    uint32_t sample_rate = 0;
+    uint8_t bit_depth = 0;
+    assert(read_wav(restored.string(),
+                    restored_left,
+                    restored_right,
+                    channels,
+                    sample_rate,
+                    bit_depth));
+    assert(restored_left == left);
+    assert(restored_right == right);
+    assert(channels == 2);
+    assert(sample_rate == 48000);
+    assert(bit_depth == 24);
+    assert_no_staged_output_siblings(dir);
+}
+
+void assert_publish_failure_cleans_up(const std::filesystem::path& cli,
+                                      const std::filesystem::path& dir) {
+    const auto wav = dir / "publish_failure_source.wav";
+    const auto lac = dir / "publish_failure_source.lac";
+    const auto output_dir = dir / "publish_failure_output";
+    const auto marker = output_dir / "marker";
+    assert(write_wav(wav.string(), make_samples(64, 16, 0), {}, 1, 44100, 16));
+    assert(run_cli(cli, {"encode", wav.string(), lac.string()}));
+    assert(std::filesystem::create_directory(output_dir));
+    const std::vector<uint8_t> sentinel = {0x11u, 0x22u, 0x33u};
+    save_binary_file(marker, sentinel);
+
+    assert(!run_cli(cli, {"encode", wav.string(), output_dir.string()}));
+    assert(load_binary_file(marker) == sentinel);
+    assert_no_staged_output_siblings(dir);
+
+    assert(!run_cli(cli, {"decode", lac.string(), output_dir.string()}));
+    assert(load_binary_file(marker) == sentinel);
+    assert_no_staged_output_siblings(dir);
+}
+
+void assert_link_targets_not_clobbered(const std::filesystem::path& cli,
+                                       const std::filesystem::path& dir) {
+    const auto wav = dir / "link_source.wav";
+    const auto baseline_lac = dir / "link_source.lac";
+    assert(write_wav(wav.string(), make_samples(64, 16, 0), {}, 1, 44100, 16));
+    assert(run_cli(cli, {"encode", wav.string(), baseline_lac.string()}));
+
+    const std::vector<uint8_t> sentinel = {0x44u, 0x55u, 0x66u};
+    const auto hardlink_target = dir / "hardlink_target";
+    const auto hardlink_output = dir / "hardlink_output.lac";
+    save_binary_file(hardlink_target, sentinel);
+    std::error_code ec;
+    std::filesystem::create_hard_link(hardlink_target, hardlink_output, ec);
+    if (!ec) {
+        assert(run_cli(cli, {"encode", wav.string(), hardlink_output.string()}));
+        assert(load_binary_file(hardlink_target) == sentinel);
+        assert(load_binary_file(hardlink_output) != sentinel);
+    }
+    assert_no_staged_output_siblings(dir);
+
+    const auto symlink_target = dir / "symlink_target";
+    const auto symlink_output = dir / "symlink_output.wav";
+    save_binary_file(symlink_target, sentinel);
+    ec.clear();
+    std::filesystem::create_symlink(symlink_target, symlink_output, ec);
+    if (!ec) {
+        assert(run_cli(cli, {"decode", baseline_lac.string(), symlink_output.string()}));
+        assert(load_binary_file(symlink_target) == sentinel);
+        assert(!std::filesystem::is_symlink(symlink_output));
+    }
+    assert_no_staged_output_siblings(dir);
+}
+
+void assert_long_output_filenames_supported(const std::filesystem::path& cli,
+                                            const std::filesystem::path& dir) {
+    const auto wav = dir / "long_name_source.wav";
+    const auto lac = dir / (std::string(240, 'l') + ".lac");
+    const auto restored = dir / (std::string(240, 'w') + ".wav");
+    assert(write_wav(wav.string(), make_samples(64, 16, 0), {}, 1, 44100, 16));
+    assert(run_cli(cli, {"encode", wav.string(), lac.string()}));
+    assert(run_cli(cli, {"decode", lac.string(), restored.string()}));
+
+    std::vector<int32_t> restored_left;
+    std::vector<int32_t> restored_right;
+    uint16_t channels = 0;
+    uint32_t sample_rate = 0;
+    uint8_t bit_depth = 0;
+    assert(read_wav(restored.string(),
+                    restored_left,
+                    restored_right,
+                    channels,
+                    sample_rate,
+                    bit_depth));
+    assert(restored_left == make_samples(64, 16, 0));
+    assert(restored_right.empty());
+    assert_no_staged_output_siblings(dir);
+}
+
+void assert_restrictive_umask_supported(const std::filesystem::path& cli,
+                                        const std::filesystem::path& dir) {
+#ifndef _WIN32
+    const auto wav = dir / "umask_source.wav";
+    const auto lac = dir / "umask_output.lac";
+    const auto restored = dir / "umask_restored.wav";
+    assert(write_wav(wav.string(), make_samples(64, 16, 0), {}, 1, 44100, 16));
+
+    const mode_t previous_encode_umask = ::umask(0777);
+    const bool encoded = run_cli(cli, {"encode", wav.string(), lac.string()});
+    ::umask(previous_encode_umask);
+    assert(encoded);
+
+    std::error_code ec;
+    std::filesystem::permissions(
+        lac,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace,
+        ec);
+    assert(!ec);
+
+    const mode_t previous_decode_umask = ::umask(0777);
+    const bool decoded = run_cli(cli, {"decode", lac.string(), restored.string()});
+    ::umask(previous_decode_umask);
+    assert(decoded);
+
+    std::filesystem::permissions(
+        restored,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace,
+        ec);
+    assert(!ec);
+    assert_no_staged_output_siblings(dir);
+#else
+    (void)cli;
+    (void)dir;
+#endif
 }
 
 } // namespace
@@ -247,6 +429,11 @@ int main(int argc, char** argv) {
                      Block::MAX_BLOCK_SIZE + 37u);
     assert_same_path_rejected(cli, dir);
     assert_malformed_input_rejected_without_clobber(cli, dir);
+    assert_existing_output_overwritten(cli, dir);
+    assert_publish_failure_cleans_up(cli, dir);
+    assert_link_targets_not_clobbered(cli, dir);
+    assert_long_output_filenames_supported(cli, dir);
+    assert_restrictive_umask_supported(cli, dir);
 
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);

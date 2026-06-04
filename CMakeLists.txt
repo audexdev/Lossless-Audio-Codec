@@ -31,6 +31,7 @@ add_library(lac STATIC
     src/codec/frame/frame_header.hpp
     src/codec/lac/decoder.hpp
     src/codec/lac/encoder.hpp
+    src/codec/lac/thread_limit.hpp
     src/codec/lac/thread_collector.hpp
     src/codec/lpc/lpc.hpp
     src/codec/rice/rice.hpp

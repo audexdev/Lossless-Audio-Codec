@@ -6,7 +6,7 @@
 
 struct FrameHeader {
     uint16_t sync; // 0x4C41 "LA"
-    uint8_t version; // 2 for adaptive block format
+    uint8_t version; // 3 for byte-bounded parallel block format
     uint8_t channels; // 1 or 2
     uint8_t stereo_mode; // 0=LR,1=MS,2=per-block (stereo only)
     uint32_t sample_rate; // in hz
@@ -15,7 +15,7 @@ struct FrameHeader {
 
     FrameHeader()
         : sync(0x4C41),
-          version(2),
+          version(3),
           channels(2),
           stereo_mode(2),
           sample_rate(44100),
@@ -48,7 +48,7 @@ struct FrameHeader {
     }
 
     bool validate() const {
-        if (this->sync != 0x4C41 || this->version != 2) return false;
+        if (this->sync != 0x4C41 || (this->version != 2 && this->version != 3)) return false;
         if (this->channels != 1 && this->channels != 2) return false;
         if (this->channels == 1 && this->stereo_mode != 0) return false;
         if (this->stereo_mode != 0 && this->stereo_mode != 1 && this->stereo_mode != 2) return false;

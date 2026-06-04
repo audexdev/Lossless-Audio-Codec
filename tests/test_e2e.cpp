@@ -1,9 +1,11 @@
 #include "codec/lac/encoder.hpp"
 #include "codec/lac/decoder.hpp"
 #include "codec/block/constants.hpp"
+#include "codec/block/encoder.hpp"
 #include "io/wav_io.hpp"
 #include "codec/frame/frame_header.hpp"
 #include "codec/rice/rice.hpp"
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -12,6 +14,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -256,6 +259,64 @@ uint32_t get_u32_le(const std::vector<uint8_t>& in, size_t offset) {
         (static_cast<uint32_t>(in[offset + 3]) << 24));
 }
 
+uint32_t get_u32_be(const std::vector<uint8_t>& in, size_t offset) {
+    assert(offset + 4 <= in.size());
+    return static_cast<uint32_t>(
+        (static_cast<uint32_t>(in[offset]) << 24) |
+        (static_cast<uint32_t>(in[offset + 1]) << 16) |
+        (static_cast<uint32_t>(in[offset + 2]) << 8) |
+        static_cast<uint32_t>(in[offset + 3]));
+}
+
+void set_u32_be(std::vector<uint8_t>& out, size_t offset, uint32_t value) {
+    assert(offset + 4 <= out.size());
+    out[offset] = static_cast<uint8_t>((value >> 24) & 0xFFu);
+    out[offset + 1] = static_cast<uint8_t>((value >> 16) & 0xFFu);
+    out[offset + 2] = static_cast<uint8_t>((value >> 8) & 0xFFu);
+    out[offset + 3] = static_cast<uint8_t>(value & 0xFFu);
+}
+
+size_t v3_payload_offset(const std::vector<uint8_t>& stream) {
+    assert(stream.size() >= 14);
+    assert(stream[2] == 3u);
+    const uint32_t block_count = get_u32_be(stream, 10);
+    const size_t offset = 14u + static_cast<size_t>(block_count) * 8u;
+    assert(offset <= stream.size());
+    return offset;
+}
+
+std::vector<uint32_t> v3_block_sizes(const std::vector<uint8_t>& stream) {
+    assert(stream.size() >= 14);
+    assert(stream[2] == 3u);
+    const uint32_t block_count = get_u32_be(stream, 10);
+    assert(14u + static_cast<size_t>(block_count) * 8u <= stream.size());
+    std::vector<uint32_t> sizes;
+    sizes.reserve(block_count);
+    for (uint32_t i = 0; i < block_count; ++i) {
+        sizes.push_back(get_u32_be(stream, 14u + static_cast<size_t>(i) * 8u));
+    }
+    return sizes;
+}
+
+std::vector<uint8_t> v3_stereo_flags(const std::vector<uint8_t>& stream) {
+    assert(stream.size() >= 14);
+    assert(stream[2] == 3u);
+    assert(stream[4] == 2u);
+    const uint32_t block_count = get_u32_be(stream, 10);
+    size_t payload_offset = v3_payload_offset(stream);
+    std::vector<uint8_t> flags;
+    flags.reserve(block_count);
+    for (uint32_t i = 0; i < block_count; ++i) {
+        const uint32_t payload_size = get_u32_be(stream, 18u + static_cast<size_t>(i) * 8u);
+        assert(payload_size > 0u);
+        assert(payload_offset + payload_size <= stream.size());
+        flags.push_back(stream[payload_offset]);
+        payload_offset += payload_size;
+    }
+    assert(payload_offset == stream.size());
+    return flags;
+}
+
 void append_fourcc(std::vector<uint8_t>& out, const char* fourcc) {
     out.insert(out.end(), fourcc, fourcc + 4);
 }
@@ -312,6 +373,7 @@ bool can_read_wav_bytes(const std::vector<uint8_t>& bytes) {
 std::vector<uint8_t> make_lac_with_single_mono_sample(int32_t sample, uint8_t bit_depth = 16) {
     BitWriter bw;
     FrameHeader hdr;
+    hdr.version = 2;
     hdr.channels = 1;
     hdr.stereo_mode = 0;
     hdr.bit_depth = bit_depth;
@@ -331,6 +393,7 @@ std::vector<uint8_t> make_lac_with_single_mono_sample(int32_t sample, uint8_t bi
 std::vector<uint8_t> make_lac_header_only_with_block_count(uint32_t block_count) {
     BitWriter bw;
     FrameHeader hdr;
+    hdr.version = 2;
     hdr.channels = 1;
     hdr.stereo_mode = 0;
     hdr.write(bw);
@@ -342,6 +405,7 @@ std::vector<uint8_t> make_lac_header_only_with_block_count(uint32_t block_count)
 std::vector<uint8_t> make_lac_with_short_non_final_block() {
     BitWriter bw;
     FrameHeader hdr;
+    hdr.version = 2;
     hdr.channels = 1;
     hdr.stereo_mode = 0;
     hdr.write(bw);
@@ -356,6 +420,7 @@ std::vector<uint8_t> make_lac_over_allocation_limit() {
     constexpr uint32_t blocks = 16385;
     BitWriter bw;
     FrameHeader hdr;
+    hdr.version = 2;
     hdr.channels = 1;
     hdr.stereo_mode = 0;
     hdr.write(bw);
@@ -365,6 +430,16 @@ std::vector<uint8_t> make_lac_over_allocation_limit() {
     }
     bw.flush_to_byte();
     return bw.get_buffer();
+}
+
+std::vector<uint8_t> make_v3_mono_stream(size_t frames) {
+    std::vector<int32_t> pcm(frames, 0);
+    for (size_t i = 0; i < frames; ++i) {
+        pcm[i] = static_cast<int32_t>((i % 257u) - 128);
+    }
+    LAC::Encoder encoder(12, 0, 44100, 16, false, false, false);
+    encoder.set_thread_count(2);
+    return encoder.encode(pcm, {});
 }
 
 } // namespace
@@ -431,10 +506,279 @@ void run_decoder_error_tests() {
 
     LAC::Encoder stereo_encoder(12, 2, 44100, 16, false, false, false);
     std::vector<uint8_t> stereo_stream = stereo_encoder.encode({0}, {0});
-    stereo_stream[18] = 2; // header + block count + one block size
+    stereo_stream[v3_payload_offset(stereo_stream)] = 2;
     expect_throw("invalid-per-block-stereo-flag", stereo_stream.data(), stereo_stream.size());
 
+    std::vector<uint8_t> unknown_version = make_v3_mono_stream(4096);
+    unknown_version[2] = 4;
+    expect_throw("unknown-frame-version", unknown_version.data(), unknown_version.size());
+
+    std::vector<uint8_t> truncated_v3_table = make_v3_mono_stream(4096);
+    truncated_v3_table.resize(14u + 7u);
+    expect_throw("truncated-v3-table", truncated_v3_table.data(), truncated_v3_table.size());
+
+    std::vector<uint8_t> zero_compressed_size = make_v3_mono_stream(4096);
+    set_u32_be(zero_compressed_size, 18, 0);
+    expect_throw("zero-compressed-block-size", zero_compressed_size.data(), zero_compressed_size.size());
+
+    std::vector<uint8_t> mismatched_compressed_sum = make_v3_mono_stream(4096);
+    const uint32_t original_size = get_u32_be(mismatched_compressed_sum, 18);
+    set_u32_be(mismatched_compressed_sum, 18, original_size + 1u);
+    expect_throw("compressed-size-sum-mismatch", mismatched_compressed_sum.data(), mismatched_compressed_sum.size());
+
+    std::vector<uint8_t> crossed_block_boundary = make_v3_mono_stream(32768);
+    assert(get_u32_be(crossed_block_boundary, 10) >= 2u);
+    const uint32_t first_payload_size = get_u32_be(crossed_block_boundary, 18);
+    const uint32_t second_payload_size = get_u32_be(crossed_block_boundary, 26);
+    assert(first_payload_size > 1u);
+    set_u32_be(crossed_block_boundary, 18, first_payload_size - 1u);
+    set_u32_be(crossed_block_boundary, 26, second_payload_size + 1u);
+    expect_throw("crossed-v3-block-boundary", crossed_block_boundary.data(), crossed_block_boundary.size());
+
+    std::vector<uint8_t> extra_byte_in_block = make_v3_mono_stream(32768);
+    const size_t payload_offset = v3_payload_offset(extra_byte_in_block);
+    const uint32_t first_span = get_u32_be(extra_byte_in_block, 18);
+    extra_byte_in_block.insert(extra_byte_in_block.begin() + payload_offset + first_span, 0u);
+    set_u32_be(extra_byte_in_block, 18, first_span + 1u);
+    expect_throw("extra-byte-inside-v3-block", extra_byte_in_block.data(), extra_byte_in_block.size());
+
     std::cout << "decoder error tests ok\n";
+}
+
+void run_decoder_thread_tests() {
+    constexpr size_t frames = 65536;
+    std::vector<int32_t> input(frames, 0);
+    for (size_t i = 0; i < frames; ++i) {
+        input[i] = static_cast<int32_t>((i % 2000u) - 1000);
+    }
+
+    LAC::Encoder encoder(12, 0, 44100, 16, false, false, false);
+    encoder.set_thread_count(2);
+    const std::vector<uint8_t> v3_stream = encoder.encode(input, {});
+    assert(v3_stream[2] == 3u);
+    assert(get_u32_be(v3_stream, 10) > 1u);
+
+    LAC::ThreadCollector v3_collector;
+    LAC::Decoder v3_decoder(&v3_collector);
+    v3_decoder.set_thread_count(2);
+    std::vector<int32_t> out_left;
+    std::vector<int32_t> out_right;
+    FrameHeader hdr;
+    v3_decoder.decode(v3_stream.data(), v3_stream.size(), out_left, out_right, &hdr);
+    assert(out_left == input);
+    assert(out_right.empty());
+    assert(hdr.version == 3u);
+    const size_t v3_threads = v3_collector.snapshot().size();
+    assert(v3_threads >= 1u);
+    assert(v3_threads <= 2u);
+
+    const std::vector<uint8_t> v2_stream = make_lac_with_single_mono_sample(123);
+    LAC::ThreadCollector v2_collector;
+    LAC::Decoder v2_decoder(&v2_collector);
+    v2_decoder.set_thread_count(2);
+    v2_decoder.decode(v2_stream.data(), v2_stream.size(), out_left, out_right, &hdr);
+    assert(out_left == std::vector<int32_t>{123});
+    assert(out_right.empty());
+    assert(hdr.version == 2u);
+    assert(v2_collector.snapshot().size() == 1u);
+    std::cout << "decoder thread tests ok\n";
+}
+
+void run_block_planner_tests() {
+    auto assert_sizes = [](size_t frames, const std::vector<uint32_t>& expected) {
+        LAC::Encoder encoder(12, 0, 44100, 16, false, false, false);
+        const std::vector<uint8_t> stream = encoder.encode(std::vector<int32_t>(frames, 0), {});
+        assert(v3_block_sizes(stream) == expected);
+    };
+
+    assert_sizes(16383, {16383});
+    assert_sizes(16384, {16384});
+    assert_sizes(16385, {16384, 1});
+    assert_sizes(65536, {16384, 16384, 16384, 16384});
+
+    std::vector<int32_t> quarters(Block::MAX_BLOCK_SIZE, 0);
+    for (size_t i = Block::MAX_BLOCK_SIZE / 4u; i < Block::MAX_BLOCK_SIZE / 2u; ++i) {
+        quarters[i] = 1000;
+    }
+    for (size_t i = Block::MAX_BLOCK_SIZE / 2u; i < 3u * Block::MAX_BLOCK_SIZE / 4u; ++i) {
+        quarters[i] = -1000;
+    }
+    LAC::Encoder encoder(12, 0, 44100, 16, false, false, false);
+    const std::vector<uint8_t> quarters_stream = encoder.encode(quarters, {});
+    assert(v3_block_sizes(quarters_stream) == std::vector<uint32_t>{Block::MAX_BLOCK_SIZE});
+    Block::Encoder block_encoder(12);
+    block_encoder.set_zero_run_enabled(true);
+    block_encoder.set_partitioning_enabled(true);
+    const std::vector<uint8_t> quarters_block = block_encoder.encode(quarters);
+    assert(quarters_stream.size() == 22u + quarters_block.size());
+
+    std::vector<int32_t> silence_then_noise(Block::MAX_BLOCK_SIZE);
+    uint32_t state = 29u * 8191u;
+    for (size_t i = 0; i < silence_then_noise.size(); ++i) {
+        state = state * 1664525u + 1013904223u;
+        const int32_t sample = static_cast<int32_t>(state >> 16) - 32768;
+        silence_then_noise[i] = i < silence_then_noise.size() / 2u ? 0 : sample;
+    }
+    const std::vector<uint8_t> silence_then_noise_stream = encoder.encode(silence_then_noise, {});
+    assert(v3_block_sizes(silence_then_noise_stream) == std::vector<uint32_t>{Block::MAX_BLOCK_SIZE});
+    const std::vector<uint8_t> silence_then_noise_block = block_encoder.encode(silence_then_noise);
+    assert(silence_then_noise_stream.size() == 22u + silence_then_noise_block.size());
+    std::cout << "block planner tests ok\n";
+}
+
+void run_stereo_planner_tests() {
+    constexpr size_t block = Block::MAX_BLOCK_SIZE;
+    std::vector<int32_t> left(block * 2u);
+    std::vector<int32_t> right(block * 2u);
+    for (size_t i = 0; i < left.size(); ++i) {
+        left[i] = static_cast<int32_t>((i % 2001u) - 1000);
+        right[i] = (i < block) ? left[i] : 0;
+    }
+
+    LAC::Encoder encoder(12, 2, 44100, 16, false, false, false);
+    encoder.set_thread_count(2);
+    const std::vector<uint8_t> mixed_stream = encoder.encode(left, right);
+    const std::vector<uint8_t> mixed_flags = v3_stereo_flags(mixed_stream);
+    assert(std::find(mixed_flags.begin(), mixed_flags.end(), 0u) != mixed_flags.end());
+    assert(std::find(mixed_flags.begin(), mixed_flags.end(), 1u) != mixed_flags.end());
+
+    std::vector<int32_t> identical(block, 0);
+    for (size_t i = 0; i < identical.size(); ++i) {
+        identical[i] = static_cast<int32_t>((i % 2001u) - 1000);
+    }
+    const std::vector<uint8_t> ms_stream = encoder.encode(identical, identical);
+    const std::vector<uint8_t> ms_flags = v3_stereo_flags(ms_stream);
+    assert(!ms_flags.empty());
+    assert(std::all_of(ms_flags.begin(), ms_flags.end(), [](uint8_t flag) { return flag == 1u; }));
+
+    const std::vector<uint8_t> lr_stream = encoder.encode(identical, std::vector<int32_t>(block, 0));
+    const std::vector<uint8_t> lr_flags = v3_stereo_flags(lr_stream);
+    assert(!lr_flags.empty());
+    assert(std::all_of(lr_flags.begin(), lr_flags.end(), [](uint8_t flag) { return flag == 0u; }));
+
+    std::vector<int32_t> anticorrelated(4096);
+    std::vector<int32_t> inverse(4096);
+    uint32_t state = 1;
+    for (size_t i = 0; i < anticorrelated.size(); ++i) {
+        state = state * 1664525u + 1013904223u;
+        anticorrelated[i] = static_cast<int32_t>(state >> 18) - 8192;
+        inverse[i] = -anticorrelated[i];
+    }
+    anticorrelated[0] = -32768;
+    inverse[0] = 32767;
+
+    LAC::Encoder auto_encoder(12, 2, 44100, 16, false, false, false);
+    LAC::Encoder forced_lr(12, 0, 44100, 16, false, false, false);
+    LAC::Encoder forced_ms(12, 1, 44100, 16, false, false, false);
+    auto_encoder.set_thread_count(1);
+    forced_lr.set_thread_count(1);
+    forced_ms.set_thread_count(1);
+    const std::vector<uint8_t> auto_stream = auto_encoder.encode(anticorrelated, inverse);
+    const std::vector<uint8_t> forced_lr_stream = forced_lr.encode(anticorrelated, inverse);
+    const std::vector<uint8_t> forced_ms_stream = forced_ms.encode(anticorrelated, inverse);
+    const std::vector<uint8_t> auto_flags = v3_stereo_flags(auto_stream);
+    assert(std::all_of(auto_flags.begin(), auto_flags.end(), [](uint8_t flag) { return flag == 1u; }));
+    assert(auto_stream.size() == forced_ms_stream.size() + auto_flags.size());
+    assert(auto_stream.size() < forced_lr_stream.size());
+
+    std::vector<int32_t> random_left(4096);
+    std::vector<int32_t> random_right(4096);
+    state = 49917u;
+    for (size_t i = 0; i < random_left.size(); ++i) {
+        state = state * 1664525u + 1013904223u;
+        random_left[i] = static_cast<int32_t>(state >> 16) - 32768;
+        state = state * 1664525u + 1013904223u;
+        random_right[i] = static_cast<int32_t>(state >> 16) - 32768;
+    }
+    const std::vector<uint8_t> auto_random_stream = auto_encoder.encode(random_left, random_right);
+    const std::vector<uint8_t> lr_random_stream = forced_lr.encode(random_left, random_right);
+    const std::vector<uint8_t> ms_random_stream = forced_ms.encode(random_left, random_right);
+    const std::vector<uint8_t> auto_random_flags = v3_stereo_flags(auto_random_stream);
+    assert(std::all_of(auto_random_flags.begin(), auto_random_flags.end(), [](uint8_t flag) { return flag == 0u; }));
+    assert(auto_random_stream.size() == lr_random_stream.size() + auto_random_flags.size());
+    assert(auto_random_stream.size() < ms_random_stream.size());
+
+    std::vector<int32_t> alternating_left(4095);
+    std::vector<int32_t> alternating_right(4095);
+    state = 758392u;
+    for (size_t i = 0; i < alternating_left.size(); ++i) {
+        state = state * 1664525u + 1013904223u;
+        state = state * 1664525u + 1013904223u;
+        const int32_t noise = static_cast<int32_t>(state >> 16) - 32768;
+        alternating_left[i] = (i & 1u) ? static_cast<int32_t>(i) : -static_cast<int32_t>(i);
+        alternating_right[i] = alternating_left[i] + noise % 257;
+    }
+    const std::vector<uint8_t> auto_alternating_stream = auto_encoder.encode(alternating_left, alternating_right);
+    const std::vector<uint8_t> lr_alternating_stream = forced_lr.encode(alternating_left, alternating_right);
+    const std::vector<uint8_t> ms_alternating_stream = forced_ms.encode(alternating_left, alternating_right);
+    const std::vector<uint8_t> auto_alternating_flags = v3_stereo_flags(auto_alternating_stream);
+    assert(std::all_of(auto_alternating_flags.begin(), auto_alternating_flags.end(), [](uint8_t flag) { return flag == 0u; }));
+    assert(auto_alternating_stream.size() == lr_alternating_stream.size() + auto_alternating_flags.size());
+    assert(auto_alternating_stream.size() < ms_alternating_stream.size());
+
+    std::vector<int32_t> walk_left(4095);
+    std::vector<int32_t> walk_right(4095);
+    state = 13210319u;
+    int32_t left_walk = 0;
+    int32_t right_walk = 0;
+    for (size_t i = 0; i < walk_left.size(); ++i) {
+        state = state * 1664525u + 1013904223u;
+        const int32_t x = static_cast<int32_t>(state >> 16) - 32768;
+        state = state * 1664525u + 1013904223u;
+        const int32_t y = static_cast<int32_t>(state >> 16) - 32768;
+        left_walk = std::clamp<int32_t>(left_walk + x % 65, -32768, 32767);
+        right_walk = std::clamp<int32_t>(right_walk + y % 65, -32768, 32767);
+        walk_left[i] = left_walk;
+        walk_right[i] = right_walk;
+    }
+    const std::vector<uint8_t> auto_walk_stream = auto_encoder.encode(walk_left, walk_right);
+    const std::vector<uint8_t> lr_walk_stream = forced_lr.encode(walk_left, walk_right);
+    const std::vector<uint8_t> ms_walk_stream = forced_ms.encode(walk_left, walk_right);
+    const std::vector<uint8_t> auto_walk_flags = v3_stereo_flags(auto_walk_stream);
+    assert(std::all_of(auto_walk_flags.begin(), auto_walk_flags.end(), [](uint8_t flag) { return flag == 0u; }));
+    assert(auto_walk_stream.size() == lr_walk_stream.size() + auto_walk_flags.size());
+    assert(auto_walk_stream.size() < ms_walk_stream.size());
+
+    std::vector<int32_t> long_walk_left(Block::MAX_BLOCK_SIZE);
+    std::vector<int32_t> long_walk_right(Block::MAX_BLOCK_SIZE);
+    state = 13210319u;
+    left_walk = 0;
+    right_walk = 0;
+    for (size_t i = 0; i < long_walk_left.size(); ++i) {
+        state = state * 1664525u + 1013904223u;
+        const int32_t x = static_cast<int32_t>(state >> 16) - 32768;
+        state = state * 1664525u + 1013904223u;
+        const int32_t y = static_cast<int32_t>(state >> 16) - 32768;
+        left_walk = std::clamp<int32_t>(left_walk + x % 65, -32768, 32767);
+        right_walk = std::clamp<int32_t>(right_walk + y % 65, -32768, 32767);
+        long_walk_left[i] = left_walk;
+        long_walk_right[i] = right_walk;
+    }
+    const std::vector<uint8_t> auto_long_walk_stream = auto_encoder.encode(long_walk_left, long_walk_right);
+    const std::vector<uint8_t> lr_long_walk_stream = forced_lr.encode(long_walk_left, long_walk_right);
+    const std::vector<uint8_t> ms_long_walk_stream = forced_ms.encode(long_walk_left, long_walk_right);
+    const std::vector<uint8_t> auto_long_walk_flags = v3_stereo_flags(auto_long_walk_stream);
+    assert(auto_long_walk_flags == std::vector<uint8_t>{0u});
+    assert(auto_long_walk_stream.size() == lr_long_walk_stream.size() + auto_long_walk_flags.size());
+    assert(auto_long_walk_stream.size() < ms_long_walk_stream.size());
+
+    std::vector<int32_t> noise_left(Block::MAX_BLOCK_SIZE);
+    std::vector<int32_t> noise_right(Block::MAX_BLOCK_SIZE);
+    state = 1u;
+    for (size_t i = 0; i < noise_left.size(); ++i) {
+        state = state * 1664525u + 1013904223u;
+        noise_left[i] = static_cast<int32_t>(state >> 16) - 32768;
+        state = state * 1664525u + 1013904223u;
+        noise_right[i] = static_cast<int32_t>(state >> 16) - 32768;
+    }
+    const std::vector<uint8_t> auto_noise_stream = auto_encoder.encode(noise_left, noise_right);
+    const std::vector<uint8_t> lr_noise_stream = forced_lr.encode(noise_left, noise_right);
+    const std::vector<uint8_t> ms_noise_stream = forced_ms.encode(noise_left, noise_right);
+    const std::vector<uint8_t> auto_noise_flags = v3_stereo_flags(auto_noise_stream);
+    assert(auto_noise_flags.size() == 1u);
+    const std::vector<uint8_t>& selected_noise_stream = auto_noise_flags[0] == 1u ? ms_noise_stream : lr_noise_stream;
+    assert(auto_noise_stream.size() == selected_noise_stream.size() + auto_noise_flags.size());
+    std::cout << "stereo planner tests ok\n";
 }
 
 void run_wav_validation_tests() {

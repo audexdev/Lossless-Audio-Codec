@@ -1,11 +1,15 @@
 #include "decoder.hpp"
 #include <algorithm>
+#include <atomic>
+#include <exception>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include "codec/block/decoder.hpp"
 #include "codec/bitstream/bit_reader.hpp"
+#include "codec/lac/thread_limit.hpp"
 #include "codec/simd/neon.hpp"
 
 namespace LAC {
@@ -69,7 +73,11 @@ bool reconstruct_mid_side_to_output(const std::vector<int32_t>& mid,
 } // namespace
 
 Decoder::Decoder(ThreadCollector* collector)
-    : collector(collector) {}
+    : collector(collector), thread_count(0) {}
+
+void Decoder::set_thread_count(size_t max_threads) {
+  this->thread_count = max_threads;
+}
 
 void Decoder::decode(const uint8_t* data,
                      size_t size,
@@ -98,12 +106,19 @@ void Decoder::decode(const uint8_t* data,
   if (br.has_error() || block_count == 0 || block_count > MAX_BLOCK_COUNT) {
     throw_decode_error("invalid block count");
   }
-  if (block_count > br.bits_remaining() / 32u) {
+  const bool has_block_payload_sizes = (hdr.version >= 3);
+  const uint32_t table_words_per_block = has_block_payload_sizes ? 2u : 1u;
+  if (block_count > br.bits_remaining() / (32u * table_words_per_block)) {
     throw_decode_error("truncated block size table");
   }
 
   std::vector<uint32_t> block_sizes(block_count);
+  std::vector<uint32_t> block_payload_sizes;
+  if (has_block_payload_sizes) {
+    block_payload_sizes.resize(block_count);
+  }
   uint64_t total_samples = 0;
+  uint64_t total_block_payload_bytes = 0;
   for (uint32_t i = 0; i < block_count; ++i) {
     uint32_t sz = br.read_bits(32);
     if (br.has_error() || sz == 0 || sz > Block::MAX_BLOCK_SIZE ||
@@ -115,6 +130,17 @@ void Decoder::decode(const uint8_t* data,
       throw_decode_error("total samples exceed maximum");
     }
     block_sizes[i] = sz;
+    if (has_block_payload_sizes) {
+      const uint32_t payload_size = br.read_bits(32);
+      if (br.has_error() || payload_size == 0) {
+        throw_decode_error("invalid compressed block size");
+      }
+      total_block_payload_bytes += payload_size;
+      if (total_block_payload_bytes > payload_bytes) {
+        throw_decode_error("compressed block sizes exceed frame payload");
+      }
+      block_payload_sizes[i] = payload_size;
+    }
   }
   const uint64_t decoded_pcm_bytes =
       total_samples * static_cast<uint64_t>(hdr.channels) * sizeof(int32_t);
@@ -144,15 +170,13 @@ void Decoder::decode(const uint8_t* data,
     decoded_right.assign(running, 0);
   }
 
-  if (this->collector) {
-    this->collector->record(std::this_thread::get_id());
-  }
-
-  for (uint32_t i = 0; i < block_count; ++i) {
+  auto decode_block = [&](uint32_t i, BitReader& block_reader) {
     bool mid_side = false;
     if (perBlockStereo) {
-      uint32_t mode_flag = br.read_bits(8);
-      if (br.has_error() || mode_flag > 1u) throw_decode_error("invalid per-block stereo flag");
+      uint32_t mode_flag = block_reader.read_bits(8);
+      if (block_reader.has_error() || mode_flag > 1u) {
+        throw_decode_error("invalid per-block stereo flag");
+      }
       mid_side = (mode_flag == 1u);
     } else if (forceMidSide) {
       mid_side = true;
@@ -160,13 +184,13 @@ void Decoder::decode(const uint8_t* data,
 
     Block::Decoder blockDec;
     std::vector<int32_t> primary_pcm;
-    if (!blockDec.decode(br, block_sizes[i], primary_pcm)) {
+    if (!blockDec.decode(block_reader, block_sizes[i], primary_pcm)) {
       throw_decode_error(i, "primary");
     }
 
     std::vector<int32_t> secondary_pcm;
     if (isStereo) {
-      if (!blockDec.decode(br, block_sizes[i], secondary_pcm)) {
+      if (!blockDec.decode(block_reader, block_sizes[i], secondary_pcm)) {
         throw_decode_error(i, "secondary");
       }
     }
@@ -191,10 +215,81 @@ void Decoder::decode(const uint8_t* data,
         throw_decode_error("decoded sample outside PCM bit depth");
       }
     }
-  }
+  };
 
-  if (br.bits_remaining() != 0u) {
-    throw_decode_error("trailing frame payload");
+  if (!has_block_payload_sizes) {
+    if (this->collector) {
+      this->collector->record(std::this_thread::get_id());
+    }
+    for (uint32_t i = 0; i < block_count; ++i) {
+      decode_block(i, br);
+    }
+    if (br.bits_remaining() != 0u) {
+      throw_decode_error("trailing frame payload");
+    }
+  } else {
+    if ((br.bits_remaining() & 7u) != 0u) {
+      throw_decode_error("unaligned compressed block payload");
+    }
+    const size_t available_payload_bytes = br.bits_remaining() / 8u;
+    if (total_block_payload_bytes != available_payload_bytes) {
+      throw_decode_error("compressed block sizes do not match frame payload");
+    }
+
+    const uint8_t* block_payload = payload + (payload_bytes - available_payload_bytes);
+    std::vector<size_t> block_payload_offsets(block_count);
+    size_t payload_offset = 0;
+    for (uint32_t i = 0; i < block_count; ++i) {
+      block_payload_offsets[i] = payload_offset;
+      payload_offset += block_payload_sizes[i];
+    }
+
+    size_t hardware_threads =
+        std::max<size_t>(1, static_cast<size_t>(std::thread::hardware_concurrency()));
+    const size_t thread_limit = LAC::resolve_thread_limit(this->thread_count);
+    if (thread_limit > 0) {
+      hardware_threads = std::min(hardware_threads, thread_limit);
+    }
+    const size_t worker_count = std::min<size_t>(hardware_threads, block_count);
+    std::atomic<uint32_t> next_block{0};
+    std::atomic<bool> stop_requested{false};
+    std::mutex error_mutex;
+    std::exception_ptr worker_error;
+    std::vector<std::jthread> workers;
+    workers.reserve(worker_count);
+
+    for (size_t worker_idx = 0; worker_idx < worker_count; ++worker_idx) {
+      workers.emplace_back([&]() {
+        try {
+          if (this->collector) {
+            this->collector->record(std::this_thread::get_id());
+          }
+          while (!stop_requested.load(std::memory_order_acquire)) {
+            const uint32_t block_idx = next_block.fetch_add(1, std::memory_order_relaxed);
+            if (block_idx >= block_count) return;
+            BitReader block_reader(block_payload + block_payload_offsets[block_idx],
+                                   block_payload_sizes[block_idx]);
+            decode_block(block_idx, block_reader);
+            if (block_reader.bits_remaining() != 0u) {
+              throw_decode_error(block_idx, "trailing-payload");
+            }
+          }
+        } catch (...) {
+          stop_requested.store(true, std::memory_order_release);
+          std::lock_guard<std::mutex> lock(error_mutex);
+          if (!worker_error) {
+            worker_error = std::current_exception();
+          }
+        }
+      });
+    }
+
+    for (auto& worker : workers) {
+      worker.join();
+    }
+    if (worker_error) {
+      std::rethrow_exception(worker_error);
+    }
   }
 
   if (hdr.channels == 2 && decoded_right.size() != decoded_left.size()) {

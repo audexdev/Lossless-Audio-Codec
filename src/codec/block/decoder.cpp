@@ -177,8 +177,14 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
                             LAC_DEBUG_LOG("[part-val] idx=" << (offset + idx - 1)
                                           << " v=0 k=" << current_k << "\n");
                         }
-                        ++count;
-                        current_k = adapt_k(sumU, count, stateless, adapt_state);
+                        if (!stateless) {
+                            ++count;
+                            current_k = adapt_k(sumU, count, false, adapt_state);
+                        }
+                    }
+                    if (stateless) {
+                        count += run_len;
+                        current_k = adapt_k(sumU, count, true, nullptr);
                     }
                     if (debug_zr) {
                         LAC_DEBUG_LOG("[zr-decode] run len=" << run_len << " idx=" << idx << " err=" << reader.has_error() << "\n");

@@ -1,25 +1,24 @@
 #include "encoder.hpp"
-#include <cerrno>
-#include <cstdlib>
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <atomic>
 #include <exception>
+#include <functional>
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <utility>
 #include <iostream>
 #include "codec/simd/neon.hpp"
-#include "codec/lpc/lpc.hpp"
+#include "codec/lac/thread_limit.hpp"
 #include "utils/logger.hpp"
 
 namespace {
-  constexpr double kAbsDiffWeight = 1.0;
-  constexpr double kVarianceWeight = 0.5;
-  constexpr double kSlopePenaltyWeight = 0.25;
-  constexpr double kSlopeThreshold = 4.0;
-  constexpr uint64_t kMaxCostProxy = std::numeric_limits<uint64_t>::max() / 4;
+  constexpr uint64_t kStereoConfidenceDivisor = 100;
+  constexpr size_t kStereoProbeSize = 256;
+  constexpr size_t kStereoFullComparisonLimit = 4096;
   constexpr int32_t kPcm16Min = -32768;
   constexpr int32_t kPcm16Max = 32767;
   constexpr int32_t kPcm24Min = -0x800000;
@@ -30,22 +29,44 @@ namespace {
     uint32_t size;
   };
 
-  bool has_zero_run_samples(const std::vector<int32_t>& samples) {
-    if (samples.empty()) return false;
-    size_t idx = 0;
-    while (idx < samples.size()) {
-      if (samples[idx] == 0) {
-        size_t run = 0;
-        while (idx + run < samples.size() && samples[idx + run] == 0) {
-          ++run;
-        }
-        if (run >= Block::ZERO_RUN_MIN_LENGTH) return true;
-        idx += run;
-      } else {
-        ++idx;
-      }
+  uint64_t add_saturated(uint64_t left, uint64_t right) {
+    if (right > std::numeric_limits<uint64_t>::max() - left) {
+      return std::numeric_limits<uint64_t>::max();
     }
-    return false;
+    return left + right;
+  }
+
+  uint64_t zigzag_difference(int64_t value) {
+    if (value >= 0) return static_cast<uint64_t>(value) << 1;
+    return (static_cast<uint64_t>(-(value + 1)) << 1) | 1u;
+  }
+
+  uint32_t rice_k_for_mean(uint64_t sum, uint64_t count) {
+    if (count == 0) return 0;
+    const uint64_t mean = (sum + (count >> 1)) / count;
+    uint32_t k = 0;
+    while (k < 31u && (uint64_t{1} << k) < mean) {
+      ++k;
+    }
+    return k;
+  }
+
+  uint64_t approximate_rice_bits(uint64_t sum, uint64_t count) {
+    if (count == 0) return 0;
+    const uint32_t k = rice_k_for_mean(sum, count);
+    return add_saturated(sum >> k, count * static_cast<uint64_t>(k + 1u));
+  }
+
+  std::vector<BlockInfo> plan_blocks(const std::vector<int32_t>& left) {
+    std::vector<BlockInfo> blocks;
+    size_t pos = 0;
+    while (pos < left.size()) {
+      const uint32_t size = static_cast<uint32_t>(
+          std::min<size_t>(Block::MAX_BLOCK_SIZE, left.size() - pos));
+      blocks.push_back({pos, size});
+      pos += size;
+    }
+    return blocks;
   }
 
   bool is_supported_sample_rate(uint32_t sample_rate) {
@@ -81,187 +102,99 @@ namespace {
     }
   }
 
-  bool should_enable_zero_run_for_block(const std::vector<int32_t>& pcm, int order) {
-    if (pcm.empty()) return false;
-    if (!has_zero_run_samples(pcm)) return false;
-    Block::Encoder estimator(order, false, false);
-    estimator.set_zero_run_enabled(true);
-    uint64_t bits_normal = 0;
-    uint64_t bits_zr = 0;
-    uint64_t bits_bin = 0;
-    if (!estimator.estimate_bits(pcm, bits_normal, bits_zr, bits_bin)) {
-      return false;
-    }
-    return bits_zr < std::min(bits_normal, bits_bin);
-  }
-
-  size_t parse_thread_limit(const char* value) {
-    if (value == nullptr || value[0] == '\0') {
-      return 0;
-    }
-    for (const char* p = value; *p != '\0'; ++p) {
-      if (*p < '0' || *p > '9') {
-        throw std::invalid_argument("LAC_THREADS must be a positive integer");
-      }
-    }
-
-    errno = 0;
-    char* end = nullptr;
-    unsigned long long parsed = std::strtoull(value, &end, 10);
-    if (errno != 0 || end == value || *end != '\0' || parsed == 0) {
-      throw std::invalid_argument("LAC_THREADS must be a positive integer");
-    }
-    if (parsed > static_cast<unsigned long long>(std::numeric_limits<size_t>::max())) {
-      throw std::invalid_argument("LAC_THREADS is too large");
-    }
-    return static_cast<size_t>(parsed);
-  }
-
-  size_t resolve_thread_limit(size_t explicit_limit) {
-    if (explicit_limit > 0) {
-      return explicit_limit;
-    }
-    return parse_thread_limit(std::getenv("LAC_THREADS"));
-  }
-
-  double block_slope_penalty(const std::vector<int32_t>& channel, size_t position, size_t length) {
-    if (channel.empty() || length <= 1 || position + length > channel.size()) return 0.0;
-    const int64_t first = channel[position];
-    const int64_t last = channel[position + length - 1];
-    const int64_t delta = (last >= first) ? (last - first) : (first - last);
-    const double slope = static_cast<double>(delta) / static_cast<double>(length);
-    if (slope <= kSlopeThreshold) {
-      return 0.0;
-    }
-    const double size_scale = static_cast<double>(length) / static_cast<double>(Block::MAX_BLOCK_SIZE);
-    return (slope - kSlopeThreshold) * kSlopePenaltyWeight * size_scale;
-  }
-
-  inline uint64_t estimate_rice_bits(const std::vector<int32_t>& residual) {
-    if (residual.empty()) return 0;
-    auto to_unsigned = [](int32_t r) -> uint32_t {
-      const uint32_t sign_mask =
-        (r < 0) ? std::numeric_limits<uint32_t>::max() : 0u;
-      return (static_cast<uint32_t>(r) << 1) ^ sign_mask;
-    };
-    uint64_t sum_u = 0;
-    for (int32_t r : residual) {
-      sum_u += to_unsigned(r);
-    }
-    const uint64_t mean = (sum_u + (residual.size() >> 1)) / residual.size();
-    uint32_t k = 0;
-    while ((1u << k) < mean && k < 31u) ++k;
-
-    uint64_t bits = 0;
-    for (int32_t r : residual) {
-      const uint32_t u = to_unsigned(r);
-      const uint32_t q = (k >= 31u) ? 0u : (u >> k);
-      bits += static_cast<uint64_t>(q) + 1u + k;
-    }
-    return bits;
-  }
-
-  struct StereoCost {
-    uint64_t lr_bits = kMaxCostProxy;
-    uint64_t ms_bits = kMaxCostProxy;
-    bool lr_valid = false;
-    bool ms_valid = false;
-    bool choose_ms() const {
-      if (ms_valid && !lr_valid) return true;
-      if (lr_valid && !ms_valid) return false;
-      if (!lr_valid && !ms_valid) return false;
-      if (ms_bits < lr_bits) return true;
-      if (ms_bits > lr_bits) return false;
-      return false; // tie -> LR
-    }
+  struct StereoDecision {
+    bool choose_ms = false;
+    bool uncertain = false;
   };
 
-  bool estimate_channel_cost(const std::vector<int32_t>& pcm,
-      int order,
-      bool zero_run_enabled,
-      bool partitioning_enabled,
-      uint64_t& bits) {
-    Block::Encoder estimator(order, false, false);
-    const bool use_zr = zero_run_enabled && should_enable_zero_run_for_block(pcm, order);
-    estimator.set_zero_run_enabled(use_zr);
-    estimator.set_partitioning_enabled(partitioning_enabled);
-    uint64_t bits_normal = 0;
-    uint64_t bits_zr = 0;
-    uint64_t bits_bin = 0;
-    if (!estimator.estimate_bits(pcm, bits_normal, bits_zr, bits_bin)) {
-      return false;
-    }
-    bits = std::min(bits_normal, std::min(bits_zr, bits_bin));
-    return true;
+  struct ChannelProxyCost {
+    uint64_t bits;
+    bool non_difference_predictor_active;
+  };
+
+  ChannelProxyCost estimate_channel_proxy_cost(uint64_t raw_sum,
+                                               uint64_t diff_sum,
+                                               uint64_t anti_diff_sum,
+                                               uint64_t count) {
+    const uint64_t raw_bits = approximate_rice_bits(raw_sum, count);
+    const uint64_t diff_bits = approximate_rice_bits(diff_sum, count);
+    const uint64_t anti_diff_bits = approximate_rice_bits(anti_diff_sum, count);
+    return {
+        std::min({raw_bits, diff_bits, anti_diff_bits}),
+        raw_bits < diff_bits || anti_diff_bits < diff_bits};
   }
 
-  StereoCost estimate_stereo_cost(const std::vector<int32_t>& left,
+  StereoDecision estimate_stereo_mode(const std::vector<int32_t>& left,
       const std::vector<int32_t>& right,
       size_t start,
-      size_t size,
-      int order,
-      bool zero_run_enabled,
-      bool partitioning_enabled) {
-    StereoCost cost;
-    if (size == 0 || start + size > left.size() || start + size > right.size()) {
-      return cost;
-    }
-
-    std::vector<int32_t> blockL(left.begin() + start, left.begin() + start + size);
-    std::vector<int32_t> blockR(right.begin() + start, right.begin() + start + size);
-    cost.lr_valid = estimate_channel_cost(blockL,
-                                          order,
-                                          zero_run_enabled,
-                                          partitioning_enabled,
-                                          cost.lr_bits);
-    uint64_t bits_r = 0;
-    if (estimate_channel_cost(blockR,
-                              order,
-                              zero_run_enabled,
-                              partitioning_enabled,
-                              bits_r)) {
-      if (cost.lr_valid) {
-        cost.lr_bits += bits_r;
+      size_t size) {
+    uint64_t l_raw_sum = 0;
+    uint64_t r_raw_sum = 0;
+    uint64_t m_raw_sum = 0;
+    uint64_t s_raw_sum = 0;
+    uint64_t l_sum = 0;
+    uint64_t r_sum = 0;
+    uint64_t m_sum = 0;
+    uint64_t s_sum = 0;
+    uint64_t l_anti_sum = 0;
+    uint64_t r_anti_sum = 0;
+    uint64_t m_anti_sum = 0;
+    uint64_t s_anti_sum = 0;
+    int64_t previous_l = 0;
+    int64_t previous_r = 0;
+    int64_t previous_m = 0;
+    int64_t previous_s = 0;
+    for (size_t i = 0; i < size; ++i) {
+      const int64_t l = left[start + i];
+      const int64_t r = right[start + i];
+      const int64_t m = (l + r) >> 1;
+      const int64_t s = l - r;
+      l_raw_sum = add_saturated(l_raw_sum, zigzag_difference(l));
+      r_raw_sum = add_saturated(r_raw_sum, zigzag_difference(r));
+      m_raw_sum = add_saturated(m_raw_sum, zigzag_difference(m));
+      s_raw_sum = add_saturated(s_raw_sum, zigzag_difference(s));
+      if (i == 0) {
+        l_sum = zigzag_difference(l);
+        r_sum = zigzag_difference(r);
+        m_sum = zigzag_difference(m);
+        s_sum = zigzag_difference(s);
+        l_anti_sum = l_sum;
+        r_anti_sum = r_sum;
+        m_anti_sum = m_sum;
+        s_anti_sum = s_sum;
       } else {
-        cost.lr_bits = bits_r;
-        cost.lr_valid = true;
+        l_sum = add_saturated(l_sum, zigzag_difference(l - previous_l));
+        r_sum = add_saturated(r_sum, zigzag_difference(r - previous_r));
+        m_sum = add_saturated(m_sum, zigzag_difference(m - previous_m));
+        s_sum = add_saturated(s_sum, zigzag_difference(s - previous_s));
+        l_anti_sum = add_saturated(l_anti_sum, zigzag_difference(l + previous_l));
+        r_anti_sum = add_saturated(r_anti_sum, zigzag_difference(r + previous_r));
+        m_anti_sum = add_saturated(m_anti_sum, zigzag_difference(m + previous_m));
+        s_anti_sum = add_saturated(s_anti_sum, zigzag_difference(s + previous_s));
       }
-    } else {
-      cost.lr_valid = false;
+      previous_l = l;
+      previous_r = r;
+      previous_m = m;
+      previous_s = s;
     }
-
-    // MS path
-    std::vector<int32_t> blockM(size);
-    std::vector<int32_t> blockS(size);
-    SIMD::ms_encode_simd_or_scalar(
-        left.data() + start,
-        right.data() + start,
-        blockM.data(),
-        blockS.data(),
-        size
-        );
-    cost.ms_valid = estimate_channel_cost(blockM,
-                                          order,
-                                          zero_run_enabled,
-                                          partitioning_enabled,
-                                          cost.ms_bits);
-    uint64_t bits_s = 0;
-    if (estimate_channel_cost(blockS,
-                              order,
-                              zero_run_enabled,
-                              partitioning_enabled,
-                              bits_s)) {
-      if (cost.ms_valid) {
-        cost.ms_bits += bits_s;
-      } else {
-        cost.ms_bits = bits_s;
-        cost.ms_valid = true;
-      }
-    } else {
-      cost.ms_valid = false;
-    }
-
-    return cost;
+    const uint64_t count = static_cast<uint64_t>(size);
+    const ChannelProxyCost l_cost = estimate_channel_proxy_cost(l_raw_sum, l_sum, l_anti_sum, count);
+    const ChannelProxyCost r_cost = estimate_channel_proxy_cost(r_raw_sum, r_sum, r_anti_sum, count);
+    const ChannelProxyCost m_cost = estimate_channel_proxy_cost(m_raw_sum, m_sum, m_anti_sum, count);
+    const ChannelProxyCost s_cost = estimate_channel_proxy_cost(s_raw_sum, s_sum, s_anti_sum, count);
+    const uint64_t lr_bits = add_saturated(l_cost.bits, r_cost.bits);
+    const uint64_t ms_bits = add_saturated(m_cost.bits, s_cost.bits);
+    const uint64_t smaller = std::min(lr_bits, ms_bits);
+    const uint64_t difference = (lr_bits >= ms_bits) ? (lr_bits - ms_bits) : (ms_bits - lr_bits);
+    const bool non_difference_predictor_active =
+        l_cost.non_difference_predictor_active || r_cost.non_difference_predictor_active ||
+        m_cost.non_difference_predictor_active || s_cost.non_difference_predictor_active;
+    StereoDecision decision;
+    decision.choose_ms = ms_bits < lr_bits;
+    decision.uncertain =
+        smaller == 0 || difference == 0 || non_difference_predictor_active ||
+        difference <= smaller / kStereoConfidenceDivisor;
+    return decision;
   }
 }
 
@@ -278,8 +211,7 @@ namespace LAC {
     zero_run_enabled(true),
     partitioning_enabled(true),
     debug_partitions(false),
-    thread_count(0),
-    candidates{256, 512, 1024, 2048, 4096, 8192, 16384} {}
+    thread_count(0) {}
 
   std::vector<uint8_t> Encoder::encode(
       const std::vector<int32_t>& left,
@@ -318,22 +250,7 @@ namespace LAC {
     hdr.bit_depth = this->bit_depth;
     hdr.write(writer);
 
-    std::vector<BlockInfo> blocks;
-    const size_t totalSamples = left.size();
-    size_t pos = 0;
-    while (pos < totalSamples) {
-      uint32_t block_size = this->select_block_size(left, right, pos);
-      if (block_size == 0) {
-        block_size = static_cast<uint32_t>(totalSamples - pos);
-      }
-      blocks.push_back({pos, block_size});
-      pos += block_size;
-    }
-
-    writer.write_bits(static_cast<uint32_t>(blocks.size()), 32);
-    for (const auto& block : blocks) {
-      writer.write_bits(block.size, 32);
-    }
+    std::vector<BlockInfo> blocks = plan_blocks(left);
 
     const bool isStereo = (hdr.channels == 2);
     const bool forceMidSide = isStereo && (hdr.stereo_mode == 1);
@@ -360,45 +277,40 @@ namespace LAC {
       blockEnc.set_debug_block_index(block_idx);
       std::vector<uint8_t> encodedBytes;
       const size_t start = block.start;
-      const size_t end = start + block.size;
 
       if (block.size == 0) {
         return encodedBytes;
       }
 
-      auto encode_lr = [&]() -> std::vector<uint8_t> {
+      auto encode_lr = [&](size_t range_start, size_t range_size) -> std::vector<uint8_t> {
         std::vector<uint8_t> out;
-        std::vector<int32_t> blockL(left.begin() + start, left.begin() + end);
-        bool use_zr_l = this->zero_run_enabled && should_enable_zero_run_for_block(blockL, this->order);
-        blockEnc.set_zero_run_enabled(use_zr_l);
+        std::vector<int32_t> blockL(left.begin() + range_start, left.begin() + range_start + range_size);
+        blockEnc.set_zero_run_enabled(this->zero_run_enabled);
         std::vector<uint8_t> encodedL = blockEnc.encode(blockL);
         out.insert(out.end(), encodedL.begin(), encodedL.end());
         if (isStereo) {
-          std::vector<int32_t> blockR(right.begin() + start, right.begin() + end);
-          bool use_zr_r = this->zero_run_enabled && should_enable_zero_run_for_block(blockR, this->order);
-          blockEnc.set_zero_run_enabled(use_zr_r);
+          std::vector<int32_t> blockR(right.begin() + range_start, right.begin() + range_start + range_size);
+          blockEnc.set_zero_run_enabled(this->zero_run_enabled);
           std::vector<uint8_t> encodedR = blockEnc.encode(blockR);
           out.insert(out.end(), encodedR.begin(), encodedR.end());
         }
         return out;
       };
 
-      auto encode_ms = [&]() -> std::vector<uint8_t> {
+      auto encode_ms = [&](size_t range_start, size_t range_size) -> std::vector<uint8_t> {
         std::vector<uint8_t> out;
-        std::vector<int32_t> blockMid(block.size);
-        std::vector<int32_t> blockSide(block.size);
+        std::vector<int32_t> blockMid(range_size);
+        std::vector<int32_t> blockSide(range_size);
         SIMD::ms_encode_simd_or_scalar(
-            left.data() + start,
-            right.data() + start,
+            left.data() + range_start,
+            right.data() + range_start,
             blockMid.data(),
             blockSide.data(),
-            block.size
+            range_size
             );
-        bool use_zr_mid = this->zero_run_enabled && should_enable_zero_run_for_block(blockMid, this->order);
-        blockEnc.set_zero_run_enabled(use_zr_mid);
+        blockEnc.set_zero_run_enabled(this->zero_run_enabled);
         std::vector<uint8_t> encodedMid = blockEnc.encode(blockMid);
-        bool use_zr_side = this->zero_run_enabled && should_enable_zero_run_for_block(blockSide, this->order);
-        blockEnc.set_zero_run_enabled(use_zr_side);
+        blockEnc.set_zero_run_enabled(this->zero_run_enabled);
         std::vector<uint8_t> encodedSide = blockEnc.encode(blockSide);
         out.insert(out.end(), encodedMid.begin(), encodedMid.end());
         out.insert(out.end(), encodedSide.begin(), encodedSide.end());
@@ -408,38 +320,55 @@ namespace LAC {
       std::string mode_used = "LR";
 
       if (!isStereo) {
-        encodedBytes = encode_lr();
+        encodedBytes = encode_lr(start, block.size);
       } else if (forceMidSide) {
         mode_used = "MS";
-        std::vector<uint8_t> msBytes = encode_ms();
+        std::vector<uint8_t> msBytes = encode_ms(start, block.size);
         encodedBytes.insert(encodedBytes.end(), msBytes.begin(), msBytes.end());
       } else if (!perBlockStereo) {
         mode_used = "LR";
-        std::vector<uint8_t> lrBytes = encode_lr();
+        std::vector<uint8_t> lrBytes = encode_lr(start, block.size);
         encodedBytes.insert(encodedBytes.end(), lrBytes.begin(), lrBytes.end());
       } else {
-        StereoCost cost = estimate_stereo_cost(left,
-                                               right,
-                                               start,
-                                               block.size,
-                                               this->order,
-                                               this->zero_run_enabled,
-                                               this->partitioning_enabled);
-        bool choose_ms = cost.choose_ms();
+        const StereoDecision decision = estimate_stereo_mode(left, right, start, block.size);
+        bool choose_ms = decision.choose_ms;
+        std::vector<uint8_t> selected;
+        if (decision.uncertain) {
+          if (block.size <= kStereoFullComparisonLimit) {
+            std::vector<uint8_t> lrBytes = encode_lr(start, block.size);
+            std::vector<uint8_t> msBytes = encode_ms(start, block.size);
+            choose_ms = msBytes.size() < lrBytes.size();
+            selected = choose_ms ? std::move(msBytes) : std::move(lrBytes);
+          } else {
+            // Spread bounded probes across the block so a local transition does not dominate mode selection.
+            const size_t probe_starts[] = {
+                start,
+                start + (block.size - kStereoProbeSize) / 2u,
+                start + block.size - kStereoProbeSize};
+            size_t lr_probe_size = 0;
+            size_t ms_probe_size = 0;
+            for (const size_t probe_start : probe_starts) {
+              lr_probe_size += encode_lr(probe_start, kStereoProbeSize).size();
+              ms_probe_size += encode_ms(probe_start, kStereoProbeSize).size();
+            }
+            choose_ms = ms_probe_size < lr_probe_size;
+          }
+        }
         if (this->debug_stereo_est) {
           LAC_DEBUG_LOG("[stereo-est] block=" << block_idx
-            << " lr_bits=" << (cost.lr_valid ? cost.lr_bits : kMaxCostProxy)
-            << " ms_bits=" << (cost.ms_valid ? cost.ms_bits : kMaxCostProxy)
+            << " uncertain=" << (decision.uncertain ? 1 : 0)
             << " chosen=" << (choose_ms ? "MS" : "LR") << "\n";
           );
         }
         mode_used = (choose_ms ? "MS" : "LR");
         encodedBytes.push_back(choose_ms ? 1 : 0);
-        if (choose_ms) {
-          std::vector<uint8_t> msBytes = encode_ms();
+        if (!selected.empty()) {
+          encodedBytes.insert(encodedBytes.end(), selected.begin(), selected.end());
+        } else if (choose_ms) {
+          std::vector<uint8_t> msBytes = encode_ms(start, block.size);
           encodedBytes.insert(encodedBytes.end(), msBytes.begin(), msBytes.end());
         } else {
-          std::vector<uint8_t> lrBytes = encode_lr();
+          std::vector<uint8_t> lrBytes = encode_lr(start, block.size);
           encodedBytes.insert(encodedBytes.end(), lrBytes.begin(), lrBytes.end());
         }
       }
@@ -455,43 +384,42 @@ namespace LAC {
     };
 
     size_t hardware_threads = std::max<size_t>(1, static_cast<size_t>(std::thread::hardware_concurrency()));
-    const size_t thread_limit = resolve_thread_limit(this->thread_count);
+    const size_t thread_limit = LAC::resolve_thread_limit(this->thread_count);
     if (thread_limit > 0) {
       hardware_threads = std::min(hardware_threads, thread_limit);
     }
     const size_t worker_count = std::min(hardware_threads, blocks.size());
-    std::vector<std::thread> workers;
+    std::vector<std::jthread> workers;
     workers.reserve(worker_count);
 
     for (size_t worker_idx = 0; worker_idx < worker_count; ++worker_idx) {
       workers.emplace_back([&]() {
-        if (collector) {
-          collector->record(std::this_thread::get_id());
-        }
-        while (true) {
-          if (stop_requested.load(std::memory_order_acquire)) {
-            return;
+        try {
+          if (collector) {
+            collector->record(std::this_thread::get_id());
           }
-
-          size_t block_idx = 0;
-          {
-            std::lock_guard<std::mutex> lock(queue_mutex);
-            if (task_queue.empty()) {
+          while (true) {
+            if (stop_requested.load(std::memory_order_acquire)) {
               return;
             }
-            block_idx = task_queue.front();
-            task_queue.pop();
-          }
 
-          try {
-            encodedBlocks[block_idx] = encode_block(block_idx);
-          } catch (...) {
-            stop_requested.store(true, std::memory_order_release);
-            std::lock_guard<std::mutex> lock(error_mutex);
-            if (!worker_error) {
-              worker_error = std::current_exception();
+            size_t block_idx = 0;
+            {
+              std::lock_guard<std::mutex> lock(queue_mutex);
+              if (task_queue.empty()) {
+                return;
+              }
+              block_idx = task_queue.front();
+              task_queue.pop();
             }
-            return;
+
+            encodedBlocks[block_idx] = encode_block(block_idx);
+          }
+        } catch (...) {
+          stop_requested.store(true, std::memory_order_release);
+          std::lock_guard<std::mutex> lock(error_mutex);
+          if (!worker_error) {
+            worker_error = std::current_exception();
           }
         }
       });
@@ -505,14 +433,27 @@ namespace LAC {
       std::rethrow_exception(worker_error);
     }
 
-    for (const auto& bytes : encodedBlocks) {
-      for (uint8_t b : bytes) {
-        writer.write_bits(b, 8);
+    writer.write_bits(static_cast<uint32_t>(blocks.size()), 32);
+    for (size_t i = 0; i < blocks.size(); ++i) {
+      if (encodedBlocks[i].empty() ||
+          encodedBlocks[i].size() > std::numeric_limits<uint32_t>::max()) {
+        throw std::runtime_error("encoded block size is outside format limits");
       }
+      writer.write_bits(blocks[i].size, 32);
+      writer.write_bits(static_cast<uint32_t>(encodedBlocks[i].size()), 32);
+    }
+
+    size_t encoded_size = writer.get_buffer().size();
+    for (const auto& bytes : encodedBlocks) {
+      encoded_size += bytes.size();
+    }
+    writer.reserve_bytes(encoded_size);
+    for (const auto& bytes : encodedBlocks) {
+      writer.write_bytes(bytes.data(), bytes.size());
     }
 
     writer.flush_to_byte();
-    return writer.get_buffer();
+    return writer.take_buffer();
   }
 
   void Encoder::set_zero_run_enabled(bool enabled) {
@@ -529,97 +470,6 @@ namespace LAC {
 
   void Encoder::set_thread_count(size_t max_threads) {
     this->thread_count = max_threads;
-  }
-
-  uint32_t Encoder::select_block_size(const std::vector<int32_t>& left,
-      const std::vector<int32_t>& right,
-      size_t position) const {
-    if (position >= left.size()) return 0;
-    size_t remaining = left.size() - position;
-    if (remaining == 0) return 0;
-
-    double best_cost = std::numeric_limits<double>::infinity();
-    uint32_t best_size = static_cast<uint32_t>(std::min<size_t>(remaining, Block::MAX_BLOCK_SIZE));
-    bool evaluated = false;
-
-    for (uint32_t candidate : this->candidates) {
-      if (candidate == 0 || candidate > remaining) continue;
-      double cost = this->block_complexity(left, position, candidate);
-      if (!right.empty()) {
-        cost += this->block_complexity(right, position, candidate);
-      }
-      cost += block_slope_penalty(left, position, candidate);
-      if (!right.empty()) {
-        cost += block_slope_penalty(right, position, candidate);
-      }
-      evaluated = true;
-      if (cost < best_cost || (cost == best_cost && candidate > best_size)) {
-        best_cost = cost;
-        best_size = candidate;
-      }
-    }
-
-    if (!evaluated) {
-      best_size = static_cast<uint32_t>(std::min<size_t>(remaining, Block::MAX_BLOCK_SIZE));
-    }
-
-    if (best_size > remaining) {
-      best_size = static_cast<uint32_t>(remaining);
-    }
-    if (best_size > Block::MAX_BLOCK_SIZE) {
-      best_size = Block::MAX_BLOCK_SIZE;
-    }
-    if (best_size == 0) {
-      best_size = static_cast<uint32_t>(std::min<size_t>(remaining, Block::MAX_BLOCK_SIZE));
-    }
-
-    return best_size;
-  }
-
-  double Encoder::block_complexity(const std::vector<int32_t>& channel,
-      size_t position,
-      size_t length) const {
-    if (channel.empty() || length <= 1) return 0.0;
-    if (position + length > channel.size()) length = channel.size() - position;
-    if (length <= 1) return 0.0;
-
-    int64_t absdiff_sum = 0;
-    int64_t sum = 0;
-    long double sumsq = 0.0L;
-
-    const size_t end = position + length;
-    const int32_t first = channel[position];
-    sum = static_cast<int64_t>(first);
-    sumsq = static_cast<long double>(first) * static_cast<long double>(first);
-
-    if constexpr (SIMD::kHasNeon) {
-      absdiff_sum = SIMD::neon_absdiff_sum(channel.data() + position, length);
-      for (size_t i = position + 1; i < end; ++i) {
-        const int64_t v = static_cast<int64_t>(channel[i]);
-        sum += v;
-        sumsq += static_cast<long double>(v) * static_cast<long double>(v);
-      }
-    } else {
-      int32_t prev = first;
-      for (size_t i = position + 1; i < end; ++i) {
-        const int32_t cur = channel[i];
-        const int64_t v = static_cast<int64_t>(cur);
-        sum += v;
-        sumsq += static_cast<long double>(v) * static_cast<long double>(v);
-        const int64_t diff = static_cast<int64_t>(cur) - static_cast<int64_t>(prev);
-        absdiff_sum += (diff >= 0 ? diff : -diff);
-        prev = cur;
-      }
-    }
-
-    const double absdiff_avg = static_cast<double>(absdiff_sum) / static_cast<double>(length);
-    const double mean = static_cast<double>(sum) / static_cast<double>(length);
-    const double mean_sq = mean * mean;
-    const double avg_sq = static_cast<double>(sumsq / static_cast<long double>(length));
-    double variance = avg_sq - mean_sq;
-    if (variance < 0.0) variance = 0.0;
-
-    return (kAbsDiffWeight * absdiff_avg) + (kVarianceWeight * variance);
   }
 
 } // namespace LAC

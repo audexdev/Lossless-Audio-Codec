@@ -42,34 +42,23 @@ uint32_t BitReader::read_bits(int nbits) {
     if (nbits <= 0) return 0;
 
     if (!this->error && static_cast<size_t>(nbits) <= this->bits_remaining()) {
-        size_t bit_index = this->byte_pos * 8 + static_cast<size_t>(this->bit_pos);
-        int remaining = nbits;
         uint32_t value = 0;
-
+        int remaining = nbits;
         while (remaining > 0) {
-            const size_t byte_index = bit_index / 8;
-            const int bit_offset = static_cast<int>(bit_index % 8);
-
-            uint64_t window = 0;
-            int window_bits = 0;
-            size_t i = byte_index;
-            while (window_bits < 64 && i < this->size) {
-                window = (window << 8) | this->data[i++];
-                window_bits += 8;
-            }
-
-            const int usable = window_bits - bit_offset;
-            const int take = std::min(remaining, std::min(usable, 24));
-            const int shift = usable - take;
-            const uint32_t chunk = static_cast<uint32_t>((window >> shift) & low_bits_mask(take));
-
-            value = static_cast<uint32_t>((static_cast<uint64_t>(value) << take) | chunk);
-            bit_index += static_cast<size_t>(take);
+            const int available = 8 - this->bit_pos;
+            const int take = std::min(remaining, available);
+            const int shift = available - take;
+            const uint32_t chunk =
+                (static_cast<uint32_t>(this->data[this->byte_pos]) >> shift) &
+                low_bits_mask(take);
+            value = static_cast<uint32_t>((value << take) | chunk);
             remaining -= take;
+            this->bit_pos += take;
+            if (this->bit_pos == 8) {
+                this->bit_pos = 0;
+                ++this->byte_pos;
+            }
         }
-
-        this->byte_pos = bit_index / 8;
-        this->bit_pos = static_cast<int>(bit_index % 8);
         return value;
     }
 

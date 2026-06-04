@@ -1,5 +1,6 @@
 #include "rice.hpp"
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <limits>
 
@@ -19,9 +20,7 @@ void Rice::encode(BitWriter& w, int32_t value, uint32_t k) {
     uint32_t q = u >> k;
     uint32_t r = u & ((1u << k) - 1);
 
-    for (uint32_t i = 0; i < q; ++i) {
-        w.write_bit(1);
-    }
+    w.write_unary_ones(q);
     w.write_bit(0);
 
     if (k > 0) {
@@ -95,10 +94,9 @@ uint32_t Rice::adapt_k(uint64_t sum, uint32_t count, AdaptState& state) {
     // Micro window flags.
     // Base mean and k estimate using integer rounding.
     const uint64_t mean = (sum + (count >> 1)) / count;
-    uint32_t k = 0;
-    while ((1u << k) < mean && k < kMaxRiceK) {
-        ++k;
-    }
+    const uint32_t k = (mean <= 1)
+        ? 0u
+        : std::min<uint32_t>(kMaxRiceK, std::bit_width(mean - 1u));
 
     const uint32_t q_base = static_cast<uint32_t>((k >= kMaxRiceK) ? 0u : (current_u >> k));
     const uint8_t is_large = static_cast<uint8_t>(q_base > 3u);

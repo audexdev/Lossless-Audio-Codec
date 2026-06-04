@@ -16,9 +16,11 @@ public:
                 std::vector<int32_t>& left,
                 std::vector<int32_t>& right,
                 FrameHeader* out_header = nullptr);
+    void set_thread_count(size_t max_threads);
 
 private:
     ThreadCollector* collector;
+    size_t thread_count;
 };
 
 } // namespace LAC

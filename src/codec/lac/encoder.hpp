@@ -40,15 +40,6 @@ private:
     bool partitioning_enabled;
     bool debug_partitions;
     size_t thread_count;
-    std::vector<uint32_t> candidates;
-
-    uint32_t select_block_size(const std::vector<int32_t>& left,
-                               const std::vector<int32_t>& right,
-                               size_t position) const;
-
-    double block_complexity(const std::vector<int32_t>& channel,
-                            size_t position,
-                            size_t length) const;
 };
 
 } // namespace LAC
