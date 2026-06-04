@@ -8,9 +8,10 @@ namespace Block {
 
 class Decoder {
 public:
-    Decoder();
+	    Decoder();
 
-    bool decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& out);
-};
+	    bool decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& out);
+	    bool decode_into(BitReader& br, uint32_t block_size, int32_t* out);
+	};
 
 } // namespace Block

@@ -1,5 +1,6 @@
 #include "bit_reader.hpp"
 #include <algorithm>
+#include <bit>
 
 namespace {
 inline uint32_t low_bits_mask(int bits) {
@@ -41,31 +42,63 @@ uint32_t BitReader::read_bit() {
 uint32_t BitReader::read_bits(int nbits) {
     if (nbits <= 0) return 0;
 
-    if (!this->error && static_cast<size_t>(nbits) <= this->bits_remaining()) {
-        uint32_t value = 0;
-        int remaining = nbits;
-        while (remaining > 0) {
-            const int available = 8 - this->bit_pos;
-            const int take = std::min(remaining, available);
-            const int shift = available - take;
-            const uint32_t chunk =
-                (static_cast<uint32_t>(this->data[this->byte_pos]) >> shift) &
-                low_bits_mask(take);
-            value = static_cast<uint32_t>((value << take) | chunk);
-            remaining -= take;
-            this->bit_pos += take;
-            if (this->bit_pos == 8) {
-                this->bit_pos = 0;
-                ++this->byte_pos;
-            }
+    if (this->error || static_cast<size_t>(nbits) > this->bits_remaining()) {
+        this->mark_error();
+        return 0;
+    }
+
+    if (this->bit_pos == 0) {
+        if (nbits == 8) {
+            return this->data[this->byte_pos++];
+        }
+        if (nbits == 16) {
+            const uint32_t value =
+                (static_cast<uint32_t>(this->data[this->byte_pos]) << 8) |
+                static_cast<uint32_t>(this->data[this->byte_pos + 1]);
+            this->byte_pos += 2;
+            return value;
+        }
+        if (nbits == 32) {
+            const uint32_t value =
+                (static_cast<uint32_t>(this->data[this->byte_pos]) << 24) |
+                (static_cast<uint32_t>(this->data[this->byte_pos + 1]) << 16) |
+                (static_cast<uint32_t>(this->data[this->byte_pos + 2]) << 8) |
+                static_cast<uint32_t>(this->data[this->byte_pos + 3]);
+            this->byte_pos += 4;
+            return value;
+        }
+    }
+
+    const int available = 8 - this->bit_pos;
+    if (nbits <= available) {
+        const int shift = available - nbits;
+        const uint32_t value =
+            (static_cast<uint32_t>(this->data[this->byte_pos]) >> shift) &
+            low_bits_mask(nbits);
+        this->bit_pos += nbits;
+        if (this->bit_pos == 8) {
+            this->bit_pos = 0;
+            ++this->byte_pos;
         }
         return value;
     }
 
     uint32_t value = 0;
-    for (int i = 0; i < nbits; ++i) {
-        value = (value << 1) | this->read_bit();
-        if (this->error) break;
+    int remaining = nbits;
+    while (remaining > 0) {
+        const int bits_available = 8 - this->bit_pos;
+        const int take = std::min(remaining, bits_available);
+        const int shift = bits_available - take;
+        const uint32_t chunk =
+            (static_cast<uint32_t>(this->data[this->byte_pos]) >> shift) &
+            low_bits_mask(take);
+        value = static_cast<uint32_t>((value << take) | chunk);
+        remaining -= take;
+        this->bit_pos += take;
+        if (this->bit_pos == 8) {
+            this->bit_pos = 0;
+            ++this->byte_pos;
+        }
     }
 
     return value;
@@ -74,18 +107,31 @@ uint32_t BitReader::read_bits(int nbits) {
 bool BitReader::read_unary_ones(uint32_t max_ones, uint32_t& ones) {
     ones = 0;
     while (this->byte_pos < this->size) {
-        if (this->bit_pos == 0 && this->data[this->byte_pos] == 0xFFu) {
-            if (max_ones - ones < 8u) return false;
-            ones += 8u;
+        const int available = 8 - this->bit_pos;
+        const uint32_t shifted =
+            (static_cast<uint32_t>(this->data[this->byte_pos]) << this->bit_pos) & 0xFFu;
+        const uint32_t run = std::min<uint32_t>(
+            static_cast<uint32_t>(available),
+            std::countl_one(static_cast<uint32_t>(shifted << 24)));
+
+        if (max_ones - ones < run) {
+            return false;
+        }
+        ones += run;
+        this->bit_pos += static_cast<int>(run);
+        if (this->bit_pos == 8) {
+            this->bit_pos = 0;
             ++this->byte_pos;
-            continue;
         }
 
-        const uint32_t bit = this->read_bit();
-        if (this->error) return false;
-        if (bit == 0u) return true;
-        if (ones == max_ones) return false;
-        ++ones;
+        if (run < static_cast<uint32_t>(available)) {
+            ++this->bit_pos; // consume unary terminator zero
+            if (this->bit_pos == 8) {
+                this->bit_pos = 0;
+                ++this->byte_pos;
+            }
+            return true;
+        }
     }
 
     this->mark_error();

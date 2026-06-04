@@ -4,6 +4,8 @@
 #include "codec/lpc/lpc.hpp"
 #include "codec/rice/rice.hpp"
 #include "utils/logger.hpp"
+#include <algorithm>
+#include <bit>
 #include <limits>
 #include <optional>
 #include <sstream>
@@ -13,7 +15,14 @@ namespace Block {
 Decoder::Decoder() {}
 
 bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& out) {
-    if (block_size == 0 || block_size > MAX_BLOCK_SIZE) return false;
+    std::vector<int32_t> pcm(block_size);
+    if (!this->decode_into(br, block_size, pcm.data())) return false;
+    out.swap(pcm);
+    return true;
+}
+
+bool Decoder::decode_into(BitReader& br, uint32_t block_size, int32_t* out) {
+    if (block_size == 0 || block_size > MAX_BLOCK_SIZE || out == nullptr) return false;
     const bool debug_zr = LAC_DEBUG_ZR_ENABLED();
     const bool debug_part = LAC_DEBUG_PART_ENABLED();
     constexpr uint32_t kBinTagZero = 0b00u;
@@ -41,11 +50,8 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
         if (!stateless) return Rice::adapt_k(sum, count, *state);
         if (count == 0) return 0;
         const uint64_t mean = (sum + (count >> 1)) / count;
-        uint32_t k = 0;
-        while ((1u << k) < mean && k < 31u) {
-            ++k;
-        }
-        return k;
+        if (mean <= 1) return 0;
+        return std::min<uint32_t>(31u, std::bit_width(mean - uint64_t{1}));
     };
 
     auto partition_sizes_for_block = [](uint32_t size, uint8_t order) -> std::vector<uint32_t> {
@@ -70,13 +76,12 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
                                        uint32_t samples,
                                        uint32_t initial_k,
                                        uint8_t residual_mode,
-                                       std::vector<int32_t>& residual,
+                                       int32_t* residual,
                                        size_t offset,
                                        bool stateless) -> bool {
         const bool debug = debug_part;
         if (residual_mode > 2) return false;
 
-        Rice rice;
         uint32_t current_k = initial_k;
         uint64_t sumU = 0;
         uint32_t count = 0;
@@ -91,12 +96,12 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
 
         if (residual_mode == 0) {
             for (uint32_t i = 0; i < samples; ++i) {
-                if (!rice.decode(reader, current_k, residual[offset + i])) return false;
-                uint32_t u = to_unsigned(residual[offset + i]);
+                uint32_t u = 0;
+                if (!read_rice_unsigned(reader, current_k, u)) return false;
+                residual[offset + i] = zigzag_decode(u);
                 sumU += u;
                 ++count;
                 current_k = adapt_k(sumU, count, stateless, adapt_state);
-                if (reader.has_error()) return false;
             }
             return true;
         }
@@ -108,26 +113,14 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
 
             uint32_t idx = 0;
             while (idx < samples) {
-                uint32_t tag_prefix = reader.read_bit();
+                uint32_t tag = reader.read_bits(2);
                 if (reader.has_error()) {
                     if (debug) {
                         LAC_DEBUG_LOG("[part-dec] read error before tag idx=" << idx << "\n");
                     }
                     return false;
                 }
-                uint32_t tag_suffix = reader.read_bit();
-                if (reader.has_error()) {
-                    if (debug) {
-                        LAC_DEBUG_LOG("[part-dec] read error before tag idx=" << idx << "\n");
-                    }
-                    return false;
-                }
-                uint32_t tag = 0xFFu;
-                if (tag_prefix == 0u) {
-                    tag = (tag_suffix == 0u) ? kTagNormal : kTagRun; // 00 / 01
-                } else if (tag_suffix == 0u) {
-                    tag = kTagEscape; // 10
-                } else {
+                if (tag > kTagEscape) {
                     if (debug) {
                         LAC_DEBUG_LOG("[part-dec] invalid tag=3 idx=" << idx << "\n");
                     }
@@ -171,13 +164,14 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
                         }
                         return false;
                     }
-                    for (uint32_t j = 0; j < run_len; ++j) {
-                        residual[offset + idx++] = 0;
-                        if (debug && idx <= 8) {
-                            LAC_DEBUG_LOG("[part-val] idx=" << (offset + idx - 1)
-                                          << " v=0 k=" << current_k << "\n");
-                        }
-                        if (!stateless) {
+                    std::fill_n(residual + offset + idx, run_len, 0);
+                    if (debug && idx < 8) {
+                        LAC_DEBUG_LOG("[part-val] idx=" << (offset + idx)
+                                      << " v=0 k=" << current_k << "\n");
+                    }
+                    idx += run_len;
+                    if (!stateless) {
+                        for (uint32_t j = 0; j < run_len; ++j) {
                             ++count;
                             current_k = adapt_k(sumU, count, false, adapt_state);
                         }
@@ -273,16 +267,11 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
         return false;
     };
 
-    auto restore_fixed = [&](const std::vector<int32_t>& residual, int order, std::vector<int32_t>& pcm) -> bool {
-        pcm.resize(residual.size(), 0);
+    auto restore_fixed_in_place = [&](int32_t* pcm, size_t size, int order) -> bool {
         if (order == 0) {
-            pcm = residual;
             return true;
         }
-        for (int i = 0; i < order && i < static_cast<int>(residual.size()); ++i) {
-            pcm[i] = residual[i];
-        }
-        for (size_t i = static_cast<size_t>(order); i < residual.size(); ++i) {
+        for (size_t i = static_cast<size_t>(order); i < size; ++i) {
             int64_t pred = 0;
             switch (order) {
                 case 1:
@@ -301,7 +290,7 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
                     pred = 0;
                     break;
             }
-            const int64_t sample = static_cast<int64_t>(residual[i]) + pred;
+            const int64_t sample = static_cast<int64_t>(pcm[i]) + pred;
             if (sample < std::numeric_limits<int32_t>::min() ||
                 sample > std::numeric_limits<int32_t>::max()) {
                 return false;
@@ -311,22 +300,50 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
         return true;
     };
 
-    auto restore_fir = [&](const std::vector<int32_t>& residual, int taps, std::vector<int32_t>& pcm) -> bool {
-        pcm.resize(residual.size(), 0);
-        for (int i = 0; i < taps && i < static_cast<int>(residual.size()); ++i) {
-            pcm[i] = residual[i];
-        }
-        for (size_t i = static_cast<size_t>(taps); i < residual.size(); ++i) {
+    auto restore_fir_in_place = [&](int32_t* pcm, size_t size, int taps) -> bool {
+        for (size_t i = static_cast<size_t>(taps); i < size; ++i) {
             int64_t pred = 0;
             pred += 3LL * pcm[i - 1];
             pred += -1LL * pcm[i - 2];
             pred >>= 2;
-            const int64_t sample = static_cast<int64_t>(residual[i]) + pred;
+            const int64_t sample = static_cast<int64_t>(pcm[i]) + pred;
             if (sample < std::numeric_limits<int32_t>::min() ||
                 sample > std::numeric_limits<int32_t>::max()) {
                 return false;
             }
             pcm[i] = static_cast<int32_t>(sample);
+        }
+        return true;
+    };
+
+    auto restore_lpc_in_place = [&](int32_t* pcm,
+                                    size_t size,
+                                    int lpc_order,
+                                    const std::vector<int16_t>& coeffs) -> bool {
+        const int coeff_order = std::max(0,
+            std::min(lpc_order, static_cast<int>(coeffs.size()) - 1));
+        const int64_t lo = static_cast<int64_t>(std::numeric_limits<int32_t>::min());
+        const int64_t hi = static_cast<int64_t>(std::numeric_limits<int32_t>::max());
+        const size_t warmup = std::min(size, static_cast<size_t>(coeff_order));
+        for (size_t n = 0; n < warmup; ++n) {
+            int64_t acc = 0;
+            for (int i = 1; i <= static_cast<int>(n); ++i) {
+                acc += static_cast<int64_t>(coeffs[i]) *
+                       static_cast<int64_t>(pcm[n - i]);
+            }
+            const int64_t sample = (acc >> 15) + static_cast<int64_t>(pcm[n]);
+            if (sample < lo || sample > hi) return false;
+            pcm[n] = static_cast<int32_t>(sample);
+        }
+        for (size_t n = warmup; n < size; ++n) {
+            int64_t acc = 0;
+            for (int i = 1; i <= coeff_order; ++i) {
+                acc += static_cast<int64_t>(coeffs[i]) *
+                       static_cast<int64_t>(pcm[n - static_cast<size_t>(i)]);
+            }
+            const int64_t sample = (acc >> 15) + static_cast<int64_t>(pcm[n]);
+            if (sample < lo || sample > hi) return false;
+            pcm[n] = static_cast<int32_t>(sample);
         }
         return true;
     };
@@ -400,7 +417,6 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
         LAC_DEBUG_LOG(oss.str());
     }
 
-    std::vector<int32_t> residual(block_size);
     const bool stateless = (partition_order > 0);
     size_t offset = 0;
     for (uint32_t i = 0; i < partition_count; ++i) {
@@ -413,7 +429,7 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
                           << " bits_before=" << bits_before
                           << "\n");
         }
-        if (!decode_residual_segment(br, part_sizes[i], part_k[i], part_modes[i], residual, offset, stateless)) {
+        if (!decode_residual_segment(br, part_sizes[i], part_k[i], part_modes[i], out, offset, stateless)) {
             if (debug_part) {
                 LAC_DEBUG_LOG("[part-fail] idx=" << i
                               << " consumed=" << (bits_before - br.bits_remaining())
@@ -437,18 +453,12 @@ bool Decoder::decode(BitReader& br, uint32_t block_size, std::vector<int32_t>& o
 
     if (!br.consume_zero_padding_to_byte()) return false;
 
-    std::vector<int32_t> pcm;
     if (predictor_type == 0) {
-        if (!restore_fixed(residual, order, pcm)) return false;
+        return restore_fixed_in_place(out, block_size, order);
     } else if (predictor_type == 1) {
-        if (!restore_fir(residual, order, pcm)) return false;
-    } else {
-        LPC lpc(order);
-        if (!lpc.restore_from_residual_q15(residual, coeffs_q15, pcm)) return false;
+        return restore_fir_in_place(out, block_size, order);
     }
-    if (pcm.size() != block_size) return false;
-    out.swap(pcm);
-    return true;
+    return restore_lpc_in_place(out, block_size, order, coeffs_q15);
 }
 
 } // namespace Block

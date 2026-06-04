@@ -38,27 +38,22 @@ bool is_valid_sample_for_depth(int64_t sample, uint8_t bit_depth) {
   return false;
 }
 
-bool copy_pcm_to_output(const std::vector<int32_t>& source,
-                        int32_t* output,
-                        uint8_t bit_depth) {
-  if (!output) return false;
-  for (size_t i = 0; i < source.size(); ++i) {
-    if (!is_valid_sample_for_depth(source[i], bit_depth)) return false;
-    output[i] = source[i];
+bool validate_pcm_range(const int32_t* samples, size_t n, uint8_t bit_depth) {
+  if (!samples) return false;
+  for (size_t i = 0; i < n; ++i) {
+    if (!is_valid_sample_for_depth(samples[i], bit_depth)) return false;
   }
   return true;
 }
 
-bool reconstruct_mid_side_to_output(const std::vector<int32_t>& mid,
-                                    const std::vector<int32_t>& side,
-                                    int32_t* left_out,
-                                    int32_t* right_out,
-                                    size_t n,
-                                    uint8_t bit_depth) {
-  if (!left_out || !right_out || mid.size() != n || side.size() != n) return false;
+bool reconstruct_mid_side_in_place(int32_t* left_out,
+                                   int32_t* right_out,
+                                   size_t n,
+                                   uint8_t bit_depth) {
+  if (!left_out || !right_out) return false;
   for (size_t i = 0; i < n; ++i) {
-    const int64_t m = mid[i];
-    const int64_t s = side[i];
+    const int64_t m = left_out[i];
+    const int64_t s = right_out[i];
     const int64_t l = m + ((s + (s & 1)) >> 1);
     const int64_t r = l - s;
     if (!is_valid_sample_for_depth(l, bit_depth) || !is_valid_sample_for_depth(r, bit_depth)) {
@@ -183,35 +178,30 @@ void Decoder::decode(const uint8_t* data,
     }
 
     Block::Decoder blockDec;
-    std::vector<int32_t> primary_pcm;
-    if (!blockDec.decode(block_reader, block_sizes[i], primary_pcm)) {
+    size_t offset = blockOffsets[i];
+    int32_t* left_out = decoded_left.data() + offset;
+    int32_t* right_out = isStereo ? decoded_right.data() + offset : nullptr;
+    if (!blockDec.decode_into(block_reader, block_sizes[i], left_out)) {
       throw_decode_error(i, "primary");
     }
 
-    std::vector<int32_t> secondary_pcm;
     if (isStereo) {
-      if (!blockDec.decode(block_reader, block_sizes[i], secondary_pcm)) {
+      if (!blockDec.decode_into(block_reader, block_sizes[i], right_out)) {
         throw_decode_error(i, "secondary");
       }
     }
 
-    size_t offset = blockOffsets[i];
     if (!isStereo) {
-      if (!copy_pcm_to_output(primary_pcm, decoded_left.data() + offset, hdr.bit_depth)) {
+      if (!validate_pcm_range(left_out, block_sizes[i], hdr.bit_depth)) {
         throw_decode_error("decoded sample outside PCM bit depth");
       }
     } else if (mid_side) {
-      if (!reconstruct_mid_side_to_output(primary_pcm,
-                                          secondary_pcm,
-                                          decoded_left.data() + offset,
-                                          decoded_right.data() + offset,
-                                          primary_pcm.size(),
-                                          hdr.bit_depth)) {
+      if (!reconstruct_mid_side_in_place(left_out, right_out, block_sizes[i], hdr.bit_depth)) {
         throw_decode_error("decoded sample outside PCM bit depth");
       }
     } else {
-      if (!copy_pcm_to_output(primary_pcm, decoded_left.data() + offset, hdr.bit_depth) ||
-          !copy_pcm_to_output(secondary_pcm, decoded_right.data() + offset, hdr.bit_depth)) {
+      if (!validate_pcm_range(left_out, block_sizes[i], hdr.bit_depth) ||
+          !validate_pcm_range(right_out, block_sizes[i], hdr.bit_depth)) {
         throw_decode_error("decoded sample outside PCM bit depth");
       }
     }

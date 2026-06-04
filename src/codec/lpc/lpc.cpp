@@ -235,14 +235,29 @@ bool LPC::restore_from_residual_q15(const std::vector<int32_t>& residual,
     out_block.resize(N);
     const int64_t lo = static_cast<int64_t>(std::numeric_limits<int32_t>::min());
     const int64_t hi = static_cast<int64_t>(std::numeric_limits<int32_t>::max());
+    const int coeff_order = std::max(0,
+        std::min(this->order, static_cast<int>(coeffs_q15.size()) - 1));
 
-    for (size_t n = 0; n < N; ++n) {
+    const size_t warmup = std::min(N, static_cast<size_t>(coeff_order));
+    for (size_t n = 0; n < warmup; ++n) {
         int64_t acc = 0;
-        for (int i = 1; i <= this->order; ++i) {
-            if (n >= static_cast<size_t>(i)) {
-                acc += static_cast<int64_t>(coeffs_q15[i]) *
-                       static_cast<int64_t>(out_block[n - i]);
-            }
+        for (int i = 1; i <= static_cast<int>(n); ++i) {
+            acc += static_cast<int64_t>(coeffs_q15[i]) *
+                   static_cast<int64_t>(out_block[n - i]);
+        }
+        const int64_t pred = (acc >> 15);
+        const int64_t sample = pred + static_cast<int64_t>(residual[n]);
+        if (sample < lo || sample > hi) {
+            out_block.clear();
+            return false;
+        }
+        out_block[n] = static_cast<int32_t>(sample);
+    }
+    for (size_t n = warmup; n < N; ++n) {
+        int64_t acc = 0;
+        for (int i = 1; i <= coeff_order; ++i) {
+            acc += static_cast<int64_t>(coeffs_q15[i]) *
+                   static_cast<int64_t>(out_block[n - static_cast<size_t>(i)]);
         }
         const int64_t pred = (acc >> 15);
         const int64_t sample = pred + static_cast<int64_t>(residual[n]);
