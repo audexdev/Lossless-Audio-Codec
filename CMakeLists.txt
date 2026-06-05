@@ -80,4 +80,15 @@ if(LAC_BUILD_TESTS)
         target_compile_options(lac_cli_tests PRIVATE -UNDEBUG)
     endif()
     add_test(NAME lac_cli_tests COMMAND lac_cli_tests $<TARGET_FILE:lac_cli>)
+
+    add_executable(lac_rice_tests
+        tests/test_rice.cpp
+    )
+    target_link_libraries(lac_rice_tests PRIVATE lac)
+    if(MSVC)
+        target_compile_options(lac_rice_tests PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(lac_rice_tests PRIVATE -UNDEBUG)
+    endif()
+    add_test(NAME lac_rice_tests COMMAND lac_rice_tests)
 endif()
