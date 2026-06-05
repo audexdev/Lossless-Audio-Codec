@@ -15,10 +15,13 @@ int32_t Rice::unsigned_to_signed(uint32_t u) {
 }
 
 void Rice::encode(BitWriter& w, int32_t value, uint32_t k) {
-    uint32_t u = signed_to_unsigned(value);
+    const uint32_t u = signed_to_unsigned(value);
 
-    uint32_t q = u >> k;
-    uint32_t r = u & ((1u << k) - 1);
+    // k <= 31 by construction (adaptive k clamps to 31; static k is a u5 field),
+    // but guard the shifts regardless: `u >> k` and `1u << k` are undefined
+    // behaviour for k >= 32. Rice::decode already rejects k > 31.
+    const uint32_t q = (k >= 32u) ? 0u : (u >> k);
+    const uint32_t r = (k >= 32u) ? u : (u & ((uint32_t{1} << k) - 1u));
 
     w.write_unary_ones(q);
     w.write_bit(0);

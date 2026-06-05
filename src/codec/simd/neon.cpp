@@ -16,10 +16,16 @@ inline void ms_encode_scalar_impl(const int32_t* L, const int32_t* R,
                                   size_t n) {
     if (!L || !R || !M || !S || n == 0) return;
     for (size_t i = 0; i < n; ++i) {
-        int32_t l = L[i];
-        int32_t r = R[i];
-        M[i] = (l + r) >> 1;
-        S[i] = l - r;
+        const int32_t l = L[i];
+        const int32_t r = R[i];
+        // Compute the sum/difference in uint32 to avoid signed-overflow UB.
+        // This reproduces the wrapping semantics of the NEON vaddq_s32 /
+        // vsubq_s32 path bit-for-bit, and is identical to `l + r` / `l - r`
+        // for the validated 16/24-bit sample domain (which never overflows).
+        const int32_t sum =
+            static_cast<int32_t>(static_cast<uint32_t>(l) + static_cast<uint32_t>(r));
+        M[i] = sum >> 1;
+        S[i] = static_cast<int32_t>(static_cast<uint32_t>(l) - static_cast<uint32_t>(r));
     }
 }
 
